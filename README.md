@@ -221,7 +221,7 @@ The browser flow only **creates** the record; downstream tools use it for subseq
 |-------|--------|
 | `No device selected` | User cancelled Chrome's USB chooser |
 | `No authorized Apple USB device` | Call `requestAppleUsbDevice()` first (from a click handler) |
-| `No CDC-NCM data interface found` | Wrong cable, device not in Developer Mode, or not iOS 17+ path |
+| `No CDC-NCM data interface found` | iPhone still in the 4-config USB mode. The library now sends Apple GET_MODE/SET_MODE(3) like go-ios and waits for re-enumeration. If it still fails on Windows: close iTunes / Apple Mobile Device Service, unlock the phone, use a data cable, iOS 17+. |
 | Pairing hangs at `discovering` | mDNS not seen — replug USB, unlock device |
 | Pairing hangs at `pairing` | Trust not approved on device |
 | `Module parse failed: Unexpected token` | Old bundler not transpiling `dist/` or `@noble/*` — see Bundler notes |

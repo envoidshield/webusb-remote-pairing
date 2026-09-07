@@ -44,6 +44,8 @@ export interface PairDeviceOptions {
 }
 
 export interface ClaimedNcmInterface {
+    /** USBDevice to use after claim. May be a new handle if NCM mode switch re-enumerated the phone. */
+    device: USBDevice
     epIn: number
     epOut: number
     claimedIface: number

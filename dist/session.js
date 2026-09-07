@@ -148,13 +148,14 @@ export class RemotePairingSession {
         this.device = dev;
         await dev.open();
         this.emitLog(`Device: ${dev.productName} (${dev.serialNumber})`);
-        const claimed = await claimCdcNcmInterface(dev, m => this.emitLog(m));
+        const claimed = await claimCdcNcmInterface(dev, m => this.emitLog(m), this.opts.signal);
+        this.device = claimed.device;
         this.epIn = claimed.epIn;
         this.epOut = claimed.epOut;
         this.claimedIface = claimed.claimedIface;
         this.setPhase('discovering', 'Waiting for _remoted._tcp');
         this.reading = true;
-        void this.readLoop(dev);
+        void this.readLoop(claimed.device);
     }
     sendEthernetFrame(frame) {
         if (!this.device)
