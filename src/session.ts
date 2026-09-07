@@ -60,6 +60,7 @@ export class RemotePairingSession {
     private pairResolve: ((r: TrustRecord) => void) | null = null
     private pairReject: ((e: Error) => void) | null = null
     private aborted = false
+    private discoverTimer: ReturnType<typeof setTimeout> | null = null
 
     constructor(options: PairDeviceOptions = {}) {
         this.opts = options
@@ -93,9 +94,16 @@ export class RemotePairingSession {
     abort() {
         this.aborted = true
         this.reading = false
+        this.clearDiscoverTimer()
         if (this.tcpConn) this.tcpConn.close()
         if (this.pairTcpConn) this.pairTcpConn.close()
-        if (this.pairReject) this.pairReject(new Error('Pairing aborted'))
+        void this.cleanupUsb()
+        if (this.pairReject) {
+            const rej = this.pairReject
+            this.pairReject = null
+            this.pairResolve = null
+            rej(new Error('Pairing aborted'))
+        }
     }
 
     /** Run the full USB → RSD → manual pairing flow. */
@@ -131,12 +139,40 @@ export class RemotePairingSession {
             },
         }
         this.setPhase('complete', 'Paired')
+        this.clearDiscoverTimer()
         this.pairResolve(rec)
     }
 
-    private fail(msg: string): never {
+    private clearDiscoverTimer() {
+        if (this.discoverTimer != null) {
+            clearTimeout(this.discoverTimer)
+            this.discoverTimer = null
+        }
+    }
+
+    private async cleanupUsb() {
+        const dev = this.device
+        const iface = this.claimedIface
+        this.device = null
+        this.claimedIface = -1
+        if (dev) await releaseCdcNcmInterface(dev, iface)
+    }
+
+    private rejectPair(msg: string): void {
+        this.clearDiscoverTimer()
+        this.reading = false
         this.setPhase('error', msg)
-        if (this.pairReject) this.pairReject(new Error(msg))
+        void this.cleanupUsb()
+        if (this.pairReject) {
+            const rej = this.pairReject
+            this.pairReject = null
+            this.pairResolve = null
+            rej(new Error(msg))
+        }
+    }
+
+    private fail(msg: string): never {
+        this.rejectPair(msg)
         throw new Error(msg)
     }
 
@@ -164,18 +200,30 @@ export class RemotePairingSession {
         if (!dev) this.fail('No authorized Apple USB device — call requestAppleUsbDevice() first')
         this.device = dev
 
-        await dev.open()
-        this.emitLog(`Device: ${dev.productName} (${dev.serialNumber})`)
+        try {
+            if (!dev.opened) await dev.open()
+            this.emitLog(`Device: ${dev.productName} (${dev.serialNumber})`)
 
-        const claimed = await claimCdcNcmInterface(dev, m => this.emitLog(m), this.opts.signal)
-        this.device = claimed.device
-        this.epIn = claimed.epIn
-        this.epOut = claimed.epOut
-        this.claimedIface = claimed.claimedIface
+            const claimed = await claimCdcNcmInterface(dev, m => this.emitLog(m), this.opts.signal)
+            this.device = claimed.device
+            this.epIn = claimed.epIn
+            this.epOut = claimed.epOut
+            this.claimedIface = claimed.claimedIface
 
-        this.setPhase('discovering', 'Waiting for _remoted._tcp')
-        this.reading = true
-        void this.readLoop(claimed.device)
+            this.setPhase('discovering', 'Waiting for _remoted._tcp')
+            this.discoverTimer = setTimeout(() => {
+                if (this.phase === 'discovering') {
+                    this.rejectPair(
+                        'No mDNS from the iPhone after claiming CDC-NCM. Unlock the phone, use a data cable, and retry.',
+                    )
+                }
+            }, 45000)
+            this.reading = true
+            void this.readLoop(claimed.device)
+        } catch (e: any) {
+            const msg = e && e.message ? e.message : String(e)
+            this.rejectPair(msg)
+        }
     }
 
     private sendEthernetFrame(frame: Uint8Array) {
@@ -192,16 +240,18 @@ export class RemotePairingSession {
     private async readLoop(dev: USBDevice) {
         while (this.reading && !this.aborted) {
             try {
-                const result = await Promise.race([
-                    dev.transferIn(this.epIn, 16384),
-                    new Promise<null>((_, rej) => setTimeout(() => rej(new Error('timeout')), 5000)),
-                ]) as USBInTransferResult
+                const result = await dev.transferIn(this.epIn, 16384)
                 if (result.data && result.data.byteLength > 0) {
                     this.processNcmTransfer(result.data)
                 }
             } catch (e: any) {
-                if (e.message === 'timeout') continue
-                if (e.message.includes('disconnected') || e.message.includes('cancelled')) break
+                if (this.aborted || !this.reading) break
+                const msg = e && e.message ? e.message : String(e)
+                if (/disconnected|cancelled|device not found|The device was disconnected/i.test(msg)) {
+                    this.rejectPair(`USB disconnected during pairing: ${msg}`)
+                    break
+                }
+                this.emitLog(`USB in error: ${msg}`)
                 await new Promise(r => setTimeout(r, 200))
             }
         }
@@ -254,6 +304,7 @@ export class RemotePairingSession {
         if (!svc) return
         this.mdnsCollected = true
         this.remotePairingSvc = svc
+        this.clearDiscoverTimer()
         this.emitLog(`Found ${svc.serviceName} at ${ipv6ToString(svc.address)}:${svc.port}`)
         this.sendNeighborSolicitation()
     }
@@ -335,7 +386,7 @@ export class RemotePairingSession {
         this.tcpConn.log = m => this.emitLog(m)
         this.tcpConn.onConnected = () => this.startHttp2()
         this.tcpConn.onData = data => { if (this.http2Conn) this.http2Conn.feed(data) }
-        this.tcpConn.onError = msg => this.fail(msg)
+        this.tcpConn.onError = msg => this.rejectPair(msg)
         this.tcpConn.connect()
         this.tcpConnections.push(this.tcpConn)
     }
@@ -369,7 +420,7 @@ export class RemotePairingSession {
                 this.beginPairing()
             }
         }
-        void this.xpcConn.initialize().catch((e: Error) => this.fail(e.message))
+        void this.xpcConn.initialize().catch((e: Error) => this.rejectPair(e.message))
     }
 
     private beginPairing() {
@@ -394,7 +445,7 @@ export class RemotePairingSession {
         this.pairTcpConn.log = m => this.emitLog(m)
         this.pairTcpConn.onConnected = () => this.startPairingHttp2()
         this.pairTcpConn.onData = data => { if (this.pairHttp2Conn) this.pairHttp2Conn.feed(data) }
-        this.pairTcpConn.onError = msg => this.fail(msg)
+        this.pairTcpConn.onError = msg => this.rejectPair(msg)
         this.pairTcpConn.connect()
         this.tcpConnections.push(this.pairTcpConn)
     }
@@ -423,7 +474,7 @@ export class RemotePairingSession {
                 this.pairAfterInit = false
                 void this.runPairingCrypto()
             }
-        }).catch((e: Error) => this.fail(e.message))
+        }).catch((e: Error) => this.rejectPair(e.message))
     }
 
     private async runPairingCrypto() {
@@ -439,7 +490,7 @@ export class RemotePairingSession {
             }
             this.finishSuccess(hostKey, selfId)
         } catch (e: any) {
-            this.fail(e.message)
+            this.rejectPair(e.message)
         } finally {
             this.pairingInProgress = false
         }

@@ -266,23 +266,21 @@ async function waitForReenumeratedDevice(previous, log, signal) {
         void poll();
     });
 }
-async function tryClaimCandidate(device, cand, allConfigValues, log) {
-    log(`Trying CDC-NCM config=${cand.configValue} iface=${cand.ifaceNum}`);
-    for (let rci = 0; rci < allConfigValues.length; rci++) {
-        if (allConfigValues[rci] !== cand.configValue) {
-            try {
-                await device.selectConfiguration(allConfigValues[rci]);
-            }
-            catch { /* ok */ }
+async function tryClaimCandidate(device, cand, log) {
+    const active = device.configuration ? device.configuration.configurationValue : -1;
+    log(`Trying CDC-NCM config=${cand.configValue} iface=${cand.ifaceNum} alt=${cand.altSetting} (active=${active})`);
+    // Windows WinUSB often forbids SET_CONFIGURATION on an already-configured
+    // composite device. Do not bounce through other configs; that unbinds us.
+    if (active !== cand.configValue) {
+        try {
+            await device.selectConfiguration(cand.configValue);
+        }
+        catch (e) {
+            log(`selectConfiguration(${cand.configValue}) failed: ${e.message}`);
+            return null;
         }
     }
-    try {
-        await device.selectConfiguration(cand.configValue);
-    }
-    catch (e) {
-        log(`selectConfiguration(${cand.configValue}) failed: ${e.message}`);
-        return null;
-    }
+    let lastErr = '';
     for (let attempt = 0; attempt < 20; attempt++) {
         try {
             await device.claimInterface(cand.ifaceNum);
@@ -292,22 +290,29 @@ async function tryClaimCandidate(device, cand, allConfigValues, log) {
             log(`CDC-NCM claimed: EP${cand.epIn} in / EP${cand.epOut} out`);
             return { device, epIn: cand.epIn, epOut: cand.epOut, claimedIface: cand.ifaceNum };
         }
-        catch {
-            if (attempt === 5 || attempt === 10 || attempt === 15) {
-                try {
-                    await device.selectConfiguration(allConfigValues[0]);
-                    await device.selectConfiguration(cand.configValue);
-                }
-                catch { /* ok */ }
+        catch (e) {
+            lastErr = e && e.message ? e.message : String(e);
+            if (attempt === 0 || attempt === 5 || attempt === 19) {
+                log(`claimInterface(${cand.ifaceNum}) attempt ${attempt + 1}: ${lastErr}`);
             }
         }
     }
+    log(`Gave up claiming iface ${cand.ifaceNum}: ${lastErr}`);
     return null;
 }
 async function claimFromCandidates(device, candidates, log) {
-    const allConfigValues = device.configurations.map(c => c.configurationValue);
-    for (let cIdx = candidates.length - 1; cIdx >= 0; cIdx--) {
-        const claimed = await tryClaimCandidate(device, candidates[cIdx], allConfigValues, log);
+    const activeVal = device.configuration ? device.configuration.configurationValue : -1;
+    const ordered = [];
+    for (let i = candidates.length - 1; i >= 0; i--) {
+        if (candidates[i].configValue === activeVal)
+            ordered.push(candidates[i]);
+    }
+    for (let i = candidates.length - 1; i >= 0; i--) {
+        if (candidates[i].configValue !== activeVal)
+            ordered.push(candidates[i]);
+    }
+    for (let i = 0; i < ordered.length; i++) {
+        const claimed = await tryClaimCandidate(device, ordered[i], log);
         if (claimed)
             return claimed;
     }
@@ -317,31 +322,46 @@ export async function claimCdcNcmInterface(device, log = () => { }, signal) {
     throwIfAborted(signal);
     log(`USB layout: ${describeUsbLayout(device)}`);
     let current = device;
-    let candidates = findNcmCandidates(current);
-    if (candidates.length === 0) {
-        log(`No CDC-NCM data interface yet (${current.configurations.length} USB configs). ` +
-            `Enabling Apple NCM mode (vendor GET_MODE/SET_MODE 3), as go-ios does when configs != 5.`);
-        try {
-            await enableAppleNcmMode(current, log);
+    try {
+        let candidates = findNcmCandidates(current);
+        if (candidates.length === 0) {
+            log(`No CDC-NCM data interface yet (${current.configurations.length} USB configs). ` +
+                `Enabling Apple NCM mode (vendor GET_MODE/SET_MODE 3), as go-ios does when configs != 5.`);
+            try {
+                await enableAppleNcmMode(current, log);
+            }
+            catch (e) {
+                throw new Error(`No CDC-NCM data interface found, and Apple NCM mode switch failed: ${e.message}`);
+            }
+            current = await waitForReenumeratedDevice(current, log, signal);
+            if (!current.opened) {
+                await current.open();
+            }
+            log(`After re-enumerate: ${current.productName} (${current.serialNumber})`);
+            log(`USB layout: ${describeUsbLayout(current)}`);
+            candidates = findNcmCandidates(current);
         }
-        catch (e) {
-            throw new Error(`No CDC-NCM data interface found, and Apple NCM mode switch failed: ${e.message}`);
+        if (candidates.length === 0) {
+            throw new Error(`No CDC-NCM data interface found on this device (${describeUsbLayout(current)})`);
         }
-        current = await waitForReenumeratedDevice(current, log, signal);
-        if (!current.opened) {
-            await current.open();
-        }
-        log(`After re-enumerate: ${current.productName} (${current.serialNumber})`);
-        log(`USB layout: ${describeUsbLayout(current)}`);
-        candidates = findNcmCandidates(current);
+        const claimed = await claimFromCandidates(current, candidates, log);
+        if (claimed)
+            return claimed;
+        const active = current.configuration ? current.configuration.configurationValue : -1;
+        const needed = candidates.map(c => String(c.configValue)).join(',');
+        throw new Error(`Could not claim CDC-NCM (active USB config=${active}, NCM is on config ${needed}). ` +
+            `On Windows, Chrome cannot switch USB configuration if Apple Mobile Device / UsbNcm already owns the device. ` +
+            `Close iTunes and Apple Mobile Device Service, then unplug/replug the phone.`);
     }
-    if (candidates.length === 0) {
-        throw new Error(`No CDC-NCM data interface found on this device (${describeUsbLayout(current)})`);
+    catch (e) {
+        if (current.opened) {
+            try {
+                await current.close();
+            }
+            catch { /* ok */ }
+        }
+        throw e;
     }
-    const claimed = await claimFromCandidates(current, candidates, log);
-    if (claimed)
-        return claimed;
-    throw new Error('Could not claim CDC-NCM interface (kernel driver may be holding it)');
 }
 export async function releaseCdcNcmInterface(device, claimedIface) {
     if (claimedIface >= 0) {

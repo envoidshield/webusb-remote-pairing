@@ -29,6 +29,7 @@ export declare class RemotePairingSession {
     private pairResolve;
     private pairReject;
     private aborted;
+    private discoverTimer;
     constructor(options?: PairDeviceOptions);
     get currentPhase(): PairingPhase;
     private emitLog;
@@ -37,6 +38,9 @@ export declare class RemotePairingSession {
     /** Run the full USB → RSD → manual pairing flow. */
     pair(): Promise<TrustRecord>;
     private finishSuccess;
+    private clearDiscoverTimer;
+    private cleanupUsb;
+    private rejectPair;
     private fail;
     private run;
     private sendEthernetFrame;
