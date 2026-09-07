@@ -118,15 +118,40 @@ async function vendorIn(device, request, index, length) {
         index,
     }, length);
 }
-async function setAppleNcmMode(device, log) {
-    try {
-        const set = await vendorIn(device, APPLE_SET_MODE, APPLE_NCM_MODE, 1);
-        log(`Apple SET_MODE(${APPLE_NCM_MODE}): ${formatInData(set)}`);
+function looksLikeDisconnect(msg) {
+    return /disconnect|InvalidState|NetworkError|device not found|The device is no longer|The device was disconnected/i.test(msg);
+}
+function isOsHeldUsbClass(cls) {
+    // PTP/still image (6), HID (3), audio (1), mass storage (8), hub (9), video (14)
+    return cls === 1 || cls === 3 || cls === 6 || cls === 8 || cls === 9 || cls === 14;
+}
+function vendorClaimTargets(device) {
+    const cfg = device.configuration;
+    if (!cfg)
+        return [];
+    const mux = [];
+    const vendor = [];
+    for (let i = 0; i < cfg.interfaces.length; i++) {
+        const iface = cfg.interfaces[i];
+        const alt = iface.alternates[0];
+        if (!alt || isOsHeldUsbClass(alt.interfaceClass))
+            continue;
+        if (alt.interfaceClass === 255 && alt.interfaceSubclass === 254) {
+            mux.push(iface.interfaceNumber);
+        }
+        else if (alt.interfaceClass === 255) {
+            vendor.push(iface.interfaceNumber);
+        }
     }
-    catch (e) {
-        // Device typically disconnects immediately after a successful SET_MODE.
-        log(`Apple SET_MODE(${APPLE_NCM_MODE}): ${e.message} (disconnect after switch is expected)`);
+    return mux.concat(vendor);
+}
+function configValuesHighestFirst(device) {
+    const values = [];
+    for (let i = 0; i < device.configurations.length; i++) {
+        values.push(device.configurations[i].configurationValue);
     }
+    values.sort((a, b) => b - a);
+    return values;
 }
 async function getAppleMode(device, log) {
     try {
@@ -139,24 +164,49 @@ async function getAppleMode(device, log) {
         return false;
     }
 }
-async function enableAppleNcmMode(device, log) {
-    await ensureConfigured(device, log);
-    let gotMode = await getAppleMode(device, log);
-    if (!gotMode) {
-        // Windows WinUSB: some bindings reject device-recipient vendor requests until an interface is claimed.
-        const ifaceNum = device.configuration && device.configuration.interfaces.length > 0
-            ? device.configuration.interfaces[0].interfaceNumber
-            : -1;
-        if (ifaceNum < 0) {
-            throw new Error('Could not enable CDC-NCM: Apple USB mode switch failed and no interface is available to claim. ' +
-                'On Windows, close iTunes / Apple Mobile Device Service if they hold the device.');
+async function setAppleNcmMode(device, log) {
+    try {
+        const set = await vendorIn(device, APPLE_SET_MODE, APPLE_NCM_MODE, 1);
+        log(`Apple SET_MODE(${APPLE_NCM_MODE}): ${formatInData(set)}`);
+        return 'ok';
+    }
+    catch (e) {
+        const msg = e && e.message ? e.message : String(e);
+        if (looksLikeDisconnect(msg)) {
+            log(`Apple SET_MODE(${APPLE_NCM_MODE}): ${msg} (re-enumerate expected)`);
+            return 'disconnected';
         }
-        log(`Claiming iface ${ifaceNum} to retry Apple NCM mode switch`);
-        await device.claimInterface(ifaceNum);
+        log(`Apple SET_MODE(${APPLE_NCM_MODE}) failed: ${msg}`);
+        return 'failed';
+    }
+}
+async function tryAppleModeSwitch(device, log) {
+    const gotMode = await getAppleMode(device, log);
+    const setResult = await setAppleNcmMode(device, log);
+    if (setResult === 'ok' || setResult === 'disconnected')
+        return true;
+    // GET_MODE can succeed on a mode that already exposes NCM after a previous switch.
+    return gotMode;
+}
+async function tryModeSwitchOnCurrentConfig(device, log) {
+    const active = device.configuration ? device.configuration.configurationValue : -1;
+    log(`Trying Apple NCM mode switch on config=${active} (no claim)`);
+    if (await tryAppleModeSwitch(device, log))
+        return true;
+    const targets = vendorClaimTargets(device);
+    for (let i = 0; i < targets.length; i++) {
+        const ifaceNum = targets[i];
         try {
-            gotMode = await getAppleMode(device, log);
-            if (gotMode)
-                await setAppleNcmMode(device, log);
+            log(`Claiming vendor iface ${ifaceNum} to retry Apple NCM mode switch`);
+            await device.claimInterface(ifaceNum);
+        }
+        catch (e) {
+            log(`claimInterface(${ifaceNum}) failed: ${e.message}`);
+            continue;
+        }
+        try {
+            if (await tryAppleModeSwitch(device, log))
+                return true;
         }
         finally {
             try {
@@ -164,13 +214,31 @@ async function enableAppleNcmMode(device, log) {
             }
             catch { /* ok */ }
         }
-        if (!gotMode) {
-            throw new Error('Apple USB GET_MODE failed. On Windows, close iTunes / Apple Mobile Device Service, ' +
-                'or bind WinUSB to the iPhone if Chrome cannot send vendor control transfers.');
-        }
-        return;
     }
-    await setAppleNcmMode(device, log);
+    return false;
+}
+async function enableAppleNcmMode(device, log) {
+    await ensureConfigured(device, log);
+    const configs = configValuesHighestFirst(device);
+    for (let i = 0; i < configs.length; i++) {
+        const cfg = configs[i];
+        const active = device.configuration ? device.configuration.configurationValue : -1;
+        if (active !== cfg) {
+            try {
+                await device.selectConfiguration(cfg);
+                log(`Selected config ${cfg} for Apple NCM mode switch`);
+            }
+            catch (e) {
+                log(`selectConfiguration(${cfg}) failed: ${e.message}`);
+                if (!device.configuration || device.configuration.configurationValue !== cfg)
+                    continue;
+            }
+        }
+        if (await tryModeSwitchOnCurrentConfig(device, log))
+            return;
+    }
+    throw new Error('Apple GET_MODE/SET_MODE(3) failed. Windows is holding PTP/mux interfaces. ' +
+        'Close iTunes and Apple Mobile Device Service, then unplug/replug the phone.');
 }
 function isSameAppleDevice(device, previous) {
     if (device.vendorId !== APPLE_VID)
