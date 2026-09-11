@@ -5,6 +5,7 @@
  */
 export { RemotePairingSession, pairUsbDevice, } from './session';
 export { requestAppleUsbDevice, getAuthorizedAppleDevice, claimCdcNcmInterface, releaseCdcNcmInterface, findNcmCandidates, } from './usb-claim';
+export { UsbReselectRequiredError, isUsbReselectRequiredError, PairingTrustDeniedError, isPairingTrustDeniedError, PAIRING_TRUST_DENIED_MSG, USB_CLAIM_FAILED_MSG, } from './errors';
 export { HOST_NAME, envoidHostIdentifier, createSelfIdentity, getOrCreateSelfIdentity, saveTrustRecord, buildTrustRecordPlist, downloadTrustRecord, loadStore, saveStore, } from './pairing/record';
 export { setupNewPairingGetHostKey } from './pairing/remotePair';
 export { ControlChannel, wrapEnvelope, unwrapEnvelope } from './pairing/channel';

@@ -59,6 +59,13 @@ export interface RemotePairingService {
  * Returns { address, port, hostname, serviceName } if found.
  */
 export declare function findRemotePairingService(msg: MdnsMessage): RemotePairingService | null;
+export interface MdnsSrvHint {
+    serviceName: string;
+    target: string;
+    port: number;
+}
+/** Resolve _remoted._tcp when SRV and AAAA arrive in different mDNS packets. */
+export declare function findRemotePairingServiceCached(msg: MdnsMessage, cache: MdnsSrvHint[]): RemotePairingService | null;
 /**
  * Collect ALL discovered services from an mDNS message for logging.
  */

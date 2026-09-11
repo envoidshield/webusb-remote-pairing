@@ -8,7 +8,7 @@ export interface NcmCandidate {
     epOut: number;
 }
 export declare function findNcmCandidates(device: USBDevice): NcmCandidate[];
-export declare function claimCdcNcmInterface(device: USBDevice, log?: (msg: string) => void, signal?: AbortSignal): Promise<ClaimedNcmInterface>;
+export declare function claimCdcNcmInterface(device: USBDevice, log?: (msg: string) => void, signal?: AbortSignal, onReenumerateWait?: () => void): Promise<ClaimedNcmInterface>;
 export declare function releaseCdcNcmInterface(device: USBDevice, claimedIface: number): Promise<void>;
 export declare function requestAppleUsbDevice(): Promise<USBDevice>;
 export declare function getAuthorizedAppleDevice(): Promise<USBDevice | null>;

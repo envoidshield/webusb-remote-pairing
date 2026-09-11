@@ -25,6 +25,12 @@ export {
     findNcmCandidates,
 } from './usb-claim'
 
+export {
+    UsbReselectRequiredError, isUsbReselectRequiredError,
+    PairingTrustDeniedError, isPairingTrustDeniedError, PAIRING_TRUST_DENIED_MSG,
+    USB_CLAIM_FAILED_MSG,
+} from './errors'
+
 export type { NcmCandidate } from './usb-claim'
 
 export {

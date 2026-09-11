@@ -1,6 +1,8 @@
 // RemotePairing.ControlChannelMessageEnvelope (go-ios ios/tunnel/codec.go)
 
+import { PairingTrustDeniedError } from '../errors'
 import { RemoteXpcConnection } from '../remotexpc'
+import { tlvReadCoalesced, TLV_ERROR } from './tlv'
 
 export interface PairingData {
     data: Uint8Array
@@ -35,6 +37,73 @@ export function encodePairingData(p: PairingData): Record<string, any> {
                 startNewSession: !!p.startNewSession,
             },
         },
+    }
+}
+
+function getChildOptional(m: Record<string, any>, ...keys: string[]): Record<string, any> | null {
+    let cur: any = m
+    for (let i = 0; i < keys.length; i++) {
+        if (!cur || typeof cur !== 'object') return null
+        cur = cur[keys[i]]
+    }
+    if (!cur || typeof cur !== 'object') return null
+    return cur as Record<string, any>
+}
+
+function deepFindLocalizedDescription(obj: unknown): string | null {
+    if (!obj || typeof obj !== 'object') return null
+    const rec = obj as Record<string, unknown>
+    if (typeof rec.NSLocalizedDescription === 'string') return rec.NSLocalizedDescription
+    for (const key of Object.keys(rec)) {
+        const found = deepFindLocalizedDescription(rec[key])
+        if (found) return found
+    }
+    return null
+}
+
+function extractPairingRejectedMessage(event: Record<string, any>): string | null {
+    const rej = event.pairingRejectedWithError
+    if (!rej) return null
+    return deepFindLocalizedDescription(rej) || 'The iPhone declined the pairing request'
+}
+
+function pairingDataHasTlvError(data: Uint8Array): boolean {
+    return tlvReadCoalesced(data, TLV_ERROR).length > 0
+}
+
+function tryDecodePairingData(event: Record<string, any>): PairingData | null {
+    const pd = getChildOptional(event, 'pairingData', '_0')
+    if (!pd) return null
+    try {
+        return decodePairingData(event)
+    } catch {
+        return null
+    }
+}
+
+/** Wait for SRP setup data after setupManualPairing, handling consent and rejection. */
+export async function readSetupPairingData(
+    ch: ControlChannel,
+    onStatus?: (msg: string) => void,
+): Promise<PairingData> {
+    while (true) {
+        const event = await ch.readEvent()
+
+        const rejected = extractPairingRejectedMessage(event)
+        if (rejected) throw new PairingTrustDeniedError(rejected)
+
+        if (event.awaitingUserConsent != null) {
+            onStatus && onStatus('Tap Trust on your iPhone to continue')
+            continue
+        }
+
+        const pairing = tryDecodePairingData(event)
+        if (pairing) {
+            if (pairingDataHasTlvError(pairing.data)) {
+                throw new PairingTrustDeniedError()
+            }
+            return pairing
+        }
     }
 }
 

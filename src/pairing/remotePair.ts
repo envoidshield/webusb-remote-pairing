@@ -5,7 +5,7 @@ import { chacha20poly1305 } from '@noble/ciphers/chacha'
 import { ed25519 } from '@noble/curves/ed25519'
 import { hkdf } from '@noble/hashes/hkdf'
 import { sha512 } from '@noble/hashes/sha512'
-import { ControlChannel, getChildMap } from './channel'
+import { ControlChannel, getChildMap, readSetupPairingData } from './channel'
 import { buildHostDeviceInfo } from './opack'
 import { SelfIdentity } from './record'
 import { newSrpClient } from './srp'
@@ -74,9 +74,8 @@ export async function setupNewPairingGetHostKey(
         sendingHost: 'EnVoid',
         startNewSession: true,
     })
-    await ch.read()
 
-    const deviceEvent = await ch.readPairingEvent()
+    const deviceEvent = await readSetupPairingData(ch, onStatus)
     const devicePublic = tlvReadCoalesced(deviceEvent.data, TLV_PUBLIC_KEY)
     const salt = tlvReadCoalesced(deviceEvent.data, TLV_SALT)
     if (!devicePublic.length || !salt.length) {

@@ -1,4 +1,5 @@
 import type { ClaimedNcmInterface } from './types'
+import { UsbReselectRequiredError, USB_CLAIM_FAILED_MSG } from './errors'
 
 export interface NcmCandidate {
     configValue: number
@@ -13,6 +14,7 @@ export interface NcmCandidate {
 const APPLE_VID = 0x05ac
 const APPLE_GET_MODE = 69
 const APPLE_SET_MODE = 82
+const APPLE_MUX_MODE = 1
 const APPLE_NCM_MODE = 3
 const REENUMERATE_TIMEOUT_MS = 15000
 
@@ -183,20 +185,28 @@ async function getAppleMode(device: USBDevice, log: (msg: string) => void): Prom
     }
 }
 
-async function setAppleNcmMode(device: USBDevice, log: (msg: string) => void): Promise<'ok' | 'disconnected' | 'failed'> {
+async function setAppleMode(
+    device: USBDevice,
+    mode: number,
+    log: (msg: string) => void,
+): Promise<'ok' | 'disconnected' | 'failed'> {
     try {
-        const set = await vendorIn(device, APPLE_SET_MODE, APPLE_NCM_MODE, 1)
-        log(`Apple SET_MODE(${APPLE_NCM_MODE}): ${formatInData(set)}`)
+        const set = await vendorIn(device, APPLE_SET_MODE, mode, 1)
+        log(`Apple SET_MODE(${mode}): ${formatInData(set)}`)
         return 'ok'
     } catch (e: any) {
         const msg = e && e.message ? e.message : String(e)
         if (looksLikeDisconnect(msg)) {
-            log(`Apple SET_MODE(${APPLE_NCM_MODE}): ${msg} (re-enumerate expected)`)
+            log(`Apple SET_MODE(${mode}): ${msg} (re-enumerate expected)`)
             return 'disconnected'
         }
-        log(`Apple SET_MODE(${APPLE_NCM_MODE}) failed: ${msg}`)
+        log(`Apple SET_MODE(${mode}) failed: ${msg}`)
         return 'failed'
     }
+}
+
+async function setAppleNcmMode(device: USBDevice, log: (msg: string) => void): Promise<'ok' | 'disconnected' | 'failed'> {
+    return setAppleMode(device, APPLE_NCM_MODE, log)
 }
 
 async function tryAppleModeSwitch(device: USBDevice, log: (msg: string) => void): Promise<boolean> {
@@ -271,25 +281,81 @@ function isSameAppleDevice(device: USBDevice, previous: USBDevice): boolean {
 }
 
 function pickReenumeratedDevice(devices: USBDevice[], previous: USBDevice): USBDevice | null {
-    const matches: USBDevice[] = []
     for (let i = 0; i < devices.length; i++) {
-        if (isSameAppleDevice(devices[i], previous)) matches.push(devices[i])
-    }
-    for (let i = 0; i < matches.length; i++) {
-        if (findNcmCandidates(matches[i]).length > 0) return matches[i]
-    }
-    for (let i = 0; i < matches.length; i++) {
-        if (matches[i].configurations.length >= 5) return matches[i]
+        const d = devices[i]
+        if (!isSameAppleDevice(d, previous)) continue
+        if (findNcmCandidates(d).length > 0) return d
     }
     return null
 }
 
-async function waitForReenumeratedDevice(
+function isUsbOpenDenied(err: unknown): boolean {
+    if (!err || typeof err !== 'object') return false
+    const name = (err as Error).name || ''
+    const msg = (err as Error).message || ''
+    return name === 'SecurityError'
+        || name === 'NotAllowedError'
+        || /not allowed|security error|access denied/i.test(msg)
+}
+
+async function tryOpenNcmDevice(
+    device: USBDevice,
+    previous: USBDevice,
+    log: (msg: string) => void,
+    fromConnect = false,
+): Promise<USBDevice | null> {
+    if (!isSameAppleDevice(device, previous)) return null
+    const hasNcm = findNcmCandidates(device).length > 0
+    const manyConfigs = device.configurations.length >= 5
+    if (!hasNcm && !(fromConnect && manyConfigs)) {
+        if (fromConnect) {
+            log(`Re-enumerated device has no CDC-NCM yet (configs=${device.configurations.length}), waiting`)
+        }
+        return null
+    }
+    try {
+        if (!device.opened) await device.open()
+    } catch (e: any) {
+        if (isUsbOpenDenied(e)) {
+            throw new UsbReselectRequiredError()
+        }
+        log(`USB open after re-enumerate failed: ${e && e.message ? e.message : String(e)}`)
+        return null
+    }
+    if (!hasNcm) {
+        log(`Re-enumerated device has no CDC-NCM yet (configs=${device.configurations.length}), waiting`)
+        return null
+    }
+    log(`Re-enumerated NCM device open OK: ${device.productName} (${device.serialNumber})`)
+    return device
+}
+
+async function tryOpenAppleDevice(
+    device: USBDevice,
+    previous: USBDevice,
+    log: (msg: string) => void,
+): Promise<USBDevice | null> {
+    if (!isSameAppleDevice(device, previous)) return null
+    try {
+        if (!device.opened) await device.open()
+    } catch (e: any) {
+        if (isUsbOpenDenied(e)) throw new UsbReselectRequiredError()
+        log(`USB open after re-enumerate failed: ${e && e.message ? e.message : String(e)}`)
+        return null
+    }
+    log(
+        `Re-enumerated device open OK: ${device.productName} (${device.serialNumber}) ` +
+        `configs=${device.configurations.length}`,
+    )
+    return device
+}
+
+async function waitForReenumeratedAppleDevice(
     previous: USBDevice,
     log: (msg: string) => void,
     signal?: AbortSignal,
 ): Promise<USBDevice> {
-    try { await previous.close() } catch { /* already gone after SET_MODE */ }
+    try { await previous.close() } catch { /* already gone */ }
 
     const deadline = Date.now() + REENUMERATE_TIMEOUT_MS
 
@@ -307,13 +373,140 @@ async function waitForReenumeratedDevice(
 
         const onAbort = () => finish(new Error('Pairing aborted'))
 
+        const consider = (device: USBDevice) => {
+            return tryOpenAppleDevice(device, previous, log).then(accepted => {
+                if (accepted) finish(accepted)
+            }).catch(e => {
+                finish(e instanceof Error ? e : new Error(String(e)))
+            })
+        }
+
+        const onConnect = (ev: Event) => {
+            const device = (ev as USBConnectionEvent).device
+            if (!isSameAppleDevice(device, previous)) return
+            log(`Device reconnected configs=${device.configurations.length}`)
+            void consider(device)
+        }
+
+        const poll = async () => {
+            while (!settled && Date.now() < deadline) {
+                try {
+                    throwIfAborted(signal)
+                    const devices = await navigator.usb.getDevices()
+                    for (let i = 0; i < devices.length; i++) {
+                        const d = devices[i]
+                        if (!isSameAppleDevice(d, previous)) continue
+                        log(`Found re-enumerated device via getDevices() configs=${d.configurations.length}`)
+                        await consider(d)
+                        if (settled) return
+                    }
+                    await sleep(400, signal)
+                } catch (e: any) {
+                    finish(e instanceof Error ? e : new Error(String(e)))
+                    return
+                }
+            }
+            if (!settled) {
+                finish(new Error('iPhone disconnected. Plug it in and tap ADD DEVICE.'))
+            }
+        }
+
+        if (signal) {
+            if (signal.aborted) {
+                finish(new Error('Pairing aborted'))
+                return
+            }
+            signal.addEventListener('abort', onAbort)
+        }
+        navigator.usb.addEventListener('connect', onConnect)
+        void poll()
+    })
+}
+
+async function recycleAppleUsbForNcmClaim(
+    device: USBDevice,
+    log: (msg: string) => void,
+    signal?: AbortSignal,
+    onReenumerateWait?: () => void,
+): Promise<USBDevice> {
+    log('Recycling USB mode: SET_MODE(1) mux reset, then SET_MODE(3) NCM')
+    await ensureConfigured(device, log)
+    let current = device
+    const muxResult = await setAppleMode(current, APPLE_MUX_MODE, log)
+    if (muxResult === 'failed') {
+        throw new Error('Apple SET_MODE(1) failed while recycling USB mode')
+    }
+    try { await current.close() } catch { /* ok */ }
+    onReenumerateWait?.()
+    await sleep(800, signal)
+    current = await waitForReenumeratedAppleDevice(current, log, signal)
+    await enableAppleNcmMode(current, log)
+    onReenumerateWait?.()
+    try { await current.close() } catch { /* ok */ }
+    current = await waitForReenumeratedDevice(current, log, signal)
+    if (!current.opened) {
+        try {
+            await current.open()
+        } catch (e: any) {
+            if (isUsbOpenDenied(e)) throw new UsbReselectRequiredError()
+            throw e
+        }
+    }
+    log(`After USB recycle: ${current.productName} (${current.serialNumber})`)
+    log(`USB layout: ${describeUsbLayout(current)}`)
+    return current
+}
+
+async function waitForReenumeratedDevice(
+    previous: USBDevice,
+    log: (msg: string) => void,
+    signal?: AbortSignal,
+): Promise<USBDevice> {
+    try { await previous.close() } catch { /* already gone after SET_MODE */ }
+
+    const deadline = Date.now() + REENUMERATE_TIMEOUT_MS
+
+    return new Promise<USBDevice>((resolve, reject) => {
+        let settled = false
+        let openedHold: USBDevice | null = null
+
+        const finish = (value: USBDevice | Error) => {
+            if (settled) return
+            settled = true
+            navigator.usb.removeEventListener('connect', onConnect)
+            if (signal) signal.removeEventListener('abort', onAbort)
+            if (value instanceof Error) {
+                if (openedHold && openedHold.opened) {
+                    void openedHold.close().catch(() => {})
+                }
+                reject(value)
+            } else {
+                if (openedHold && openedHold !== value && openedHold.opened) {
+                    void openedHold.close().catch(() => {})
+                }
+                resolve(value)
+            }
+        }
+
+        const onAbort = () => finish(new Error('Pairing aborted'))
+
+        const consider = (device: USBDevice, fromConnect: boolean) => {
+            return tryOpenNcmDevice(device, previous, log, fromConnect).then(accepted => {
+                if (accepted) {
+                    finish(accepted)
+                    return
+                }
+                if (device.opened) openedHold = device
+            }).catch(e => {
+                finish(e instanceof Error ? e : new Error(String(e)))
+            })
+        }
+
         const onConnect = (ev: Event) => {
             const device = (ev as USBConnectionEvent).device
             if (!isSameAppleDevice(device, previous)) return
             log(`Device reconnected after NCM mode switch configs=${device.configurations.length}`)
-            if (findNcmCandidates(device).length > 0 || device.configurations.length >= 5) {
-                finish(device)
-            }
+            void consider(device, true)
         }
 
         const poll = async () => {
@@ -323,8 +516,8 @@ async function waitForReenumeratedDevice(
                     const found = pickReenumeratedDevice(await navigator.usb.getDevices(), previous)
                     if (found) {
                         log(`Found re-enumerated device via getDevices() configs=${found.configurations.length}`)
-                        finish(found)
-                        return
+                        await consider(found, false)
+                        if (settled) return
                     }
                     await sleep(400, signal)
                 } catch (e: any) {
@@ -333,17 +526,9 @@ async function waitForReenumeratedDevice(
                 }
             }
             if (!settled) {
-                void navigator.usb.getDevices().then(list => {
-                    const fallback = list.filter(d => isSameAppleDevice(d, previous))[0]
-                    if (fallback) {
-                        log('Re-enumerate wait timed out; using current Apple USB handle')
-                        finish(fallback)
-                        return
-                    }
-                    finish(new Error(
-                        'Timed out waiting for iPhone to re-enumerate after NCM mode switch. Unplug/replug USB and retry.',
-                    ))
-                }).catch(e => finish(e instanceof Error ? e : new Error(String(e))))
+                finish(new Error(
+                    'iPhone disconnected. Plug it in and tap ADD DEVICE.',
+                ))
             }
         }
 
@@ -385,8 +570,14 @@ async function tryClaimCandidate(
             if (cand.altSetting > 0) {
                 await device.selectAlternateInterface(cand.ifaceNum, cand.altSetting)
             }
-            log(`CDC-NCM claimed: EP${cand.epIn} in / EP${cand.epOut} out`)
-            return { device, epIn: cand.epIn, epOut: cand.epOut, claimedIface: cand.ifaceNum }
+            log(`CDC-NCM claimed: EP${cand.epIn} in / EP${cand.epOut} out (config ${cand.configValue})`)
+            return {
+                device,
+                epIn: cand.epIn,
+                epOut: cand.epOut,
+                claimedIface: cand.ifaceNum,
+                fallbackConfig: false,
+            }
         } catch (e: any) {
             lastErr = e && e.message ? e.message : String(e)
             if (attempt === 0 || attempt === 5 || attempt === 19) {
@@ -396,6 +587,14 @@ async function tryClaimCandidate(
     }
     log(`Gave up claiming iface ${cand.ifaceNum}: ${lastErr}`)
     return null
+}
+
+function highestNcmConfigValue(candidates: NcmCandidate[]): number {
+    let max = 0
+    for (let i = 0; i < candidates.length; i++) {
+        if (candidates[i].configValue > max) max = candidates[i].configValue
+    }
+    return max
 }
 
 async function claimFromCandidates(
@@ -422,6 +621,7 @@ export async function claimCdcNcmInterface(
     device: USBDevice,
     log: (msg: string) => void = () => {},
     signal?: AbortSignal,
+    onReenumerateWait?: () => void,
 ): Promise<ClaimedNcmInterface> {
     throwIfAborted(signal)
     log(`USB layout: ${describeUsbLayout(device)}`)
@@ -442,9 +642,15 @@ export async function claimCdcNcmInterface(
                     `No CDC-NCM data interface found, and Apple NCM mode switch failed: ${e.message}`,
                 )
             }
+            onReenumerateWait?.()
             current = await waitForReenumeratedDevice(current, log, signal)
             if (!current.opened) {
-                await current.open()
+                try {
+                    await current.open()
+                } catch (e: any) {
+                    if (isUsbOpenDenied(e)) throw new UsbReselectRequiredError()
+                    throw e
+                }
             }
             log(`After re-enumerate: ${current.productName} (${current.serialNumber})`)
             log(`USB layout: ${describeUsbLayout(current)}`)
@@ -457,8 +663,48 @@ export async function claimCdcNcmInterface(
             )
         }
 
-        const claimed = await claimFromCandidates(current, candidates, log)
+        // Phone already in NCM mode (5+ configs): only claim NCM on the highest
+        // config. Falling back to an older config (e.g. cfg5 while active=cfg6)
+        // opens a stale handle that receives mDNS noise but never completes
+        // _remoted._tcp -> 45s "Discovering..." hang.
+        const maxNcmConfig = highestNcmConfigValue(candidates)
+        const ncmMode = current.configurations.length >= 5
+        const liveCandidates = ncmMode
+            ? candidates.filter(c => c.configValue === maxNcmConfig)
+            : candidates
+        if (ncmMode) {
+            log(
+                `NCM mode (${current.configurations.length} configs): only trying CDC-NCM on config ${maxNcmConfig}`,
+            )
+        }
+
+        let claimed = await claimFromCandidates(current, liveCandidates, log)
         if (claimed) return claimed
+
+        if (ncmMode) {
+            log('Could not claim live NCM interface; trying USB mode recycle')
+            current = await recycleAppleUsbForNcmClaim(current, log, signal, onReenumerateWait)
+            candidates = findNcmCandidates(current)
+            const maxAfterRecycle = highestNcmConfigValue(candidates)
+            const liveAfterRecycle = candidates.filter(c => c.configValue === maxAfterRecycle)
+            claimed = await claimFromCandidates(current, liveAfterRecycle, log)
+            if (claimed) return claimed
+
+            const fallbackCandidates = candidates.filter(c => c.configValue < maxAfterRecycle)
+            if (fallbackCandidates.length > 0) {
+                const cfgList = fallbackCandidates.map(c => String(c.configValue)).join(',')
+                log(
+                    `macOS may be holding config ${maxAfterRecycle}; trying fallback CDC-NCM on config(s) ${cfgList}`,
+                )
+                claimed = await claimFromCandidates(current, fallbackCandidates, log)
+                if (claimed) {
+                    claimed.fallbackConfig = true
+                    return claimed
+                }
+            }
+
+            throw new Error(USB_CLAIM_FAILED_MSG)
+        }
 
         const active = current.configuration ? current.configuration.configurationValue : -1
         const needed = candidates.map(c => String(c.configValue)).join(',')
@@ -489,5 +735,10 @@ export async function requestAppleUsbDevice(): Promise<USBDevice> {
 export async function getAuthorizedAppleDevice(): Promise<USBDevice | null> {
     const devices = await navigator.usb.getDevices()
     const apple = devices.filter(d => d.vendorId === APPLE_VID)
-    return apple.length > 0 ? apple[0] : null
+    for (let i = 0; i < apple.length; i++) {
+        if (findNcmCandidates(apple[i]).length > 0) return apple[i]
+    }
+    // Do not fall back to mux-only grants: after SET_MODE the USB identity changes and
+    // a stale mux handle can open/claim yet never deliver NCM traffic (discovering hang).
+    return null
 }

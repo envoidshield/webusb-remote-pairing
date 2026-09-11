@@ -259,6 +259,73 @@ export function findRemotePairingService(msg) {
     }
     return null;
 }
+function collectRemotedSrvHints(msg) {
+    const hints = [];
+    const allRecords = [...msg.answers, ...msg.authority, ...msg.additional];
+    for (let i = 0; i < allRecords.length; i++) {
+        const rec = allRecords[i];
+        if (!rec.parsed || rec.parsed.type !== 'SRV')
+            continue;
+        if (rec.name.indexOf('_remoted._tcp') < 0)
+            continue;
+        hints.push({
+            serviceName: rec.name,
+            target: rec.parsed.target,
+            port: rec.parsed.port,
+        });
+    }
+    return hints;
+}
+function resolveSrvHint(msg, hint) {
+    const allRecords = [...msg.answers, ...msg.authority, ...msg.additional];
+    let address = null;
+    for (let ai = 0; ai < allRecords.length; ai++) {
+        const arec = allRecords[ai];
+        if (!arec.parsed || arec.parsed.type !== 'AAAA')
+            continue;
+        if (arec.name === hint.target
+            || arec.name + '.' === hint.target
+            || hint.target.indexOf(arec.name) >= 0) {
+            address = arec.parsed.address;
+            break;
+        }
+    }
+    if (!address) {
+        for (let bi = 0; bi < allRecords.length; bi++) {
+            const brec = allRecords[bi];
+            if (brec.parsed
+                && brec.parsed.type === 'AAAA'
+                && brec.parsed.address[0] === 0xFE
+                && (brec.parsed.address[1] & 0xC0) === 0x80) {
+                address = brec.parsed.address;
+                break;
+            }
+        }
+    }
+    if (!address)
+        return null;
+    return {
+        address: new Uint8Array(address),
+        port: hint.port,
+        hostname: hint.target,
+        serviceName: hint.serviceName,
+    };
+}
+/** Resolve _remoted._tcp when SRV and AAAA arrive in different mDNS packets. */
+export function findRemotePairingServiceCached(msg, cache) {
+    const direct = findRemotePairingService(msg);
+    if (direct)
+        return direct;
+    const hints = collectRemotedSrvHints(msg);
+    for (let i = 0; i < hints.length; i++)
+        cache.push(hints[i]);
+    for (let i = 0; i < cache.length; i++) {
+        const resolved = resolveSrvHint(msg, cache[i]);
+        if (resolved)
+            return resolved;
+    }
+    return null;
+}
 /**
  * Collect ALL discovered services from an mDNS message for logging.
  */

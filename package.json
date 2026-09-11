@@ -1,6 +1,6 @@
 {
   "name": "@envoidshield/webusb-remote-pairing",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Browser WebUSB iOS 17+ remote pairing over CDC-NCM (RSD + untrusted.tunnelservice)",
   "license": "MIT",
   "author": "Envoid",

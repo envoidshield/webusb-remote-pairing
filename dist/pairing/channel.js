@@ -1,4 +1,6 @@
 // RemotePairing.ControlChannelMessageEnvelope (go-ios ios/tunnel/codec.go)
+import { PairingTrustDeniedError } from '../errors';
+import { tlvReadCoalesced, TLV_ERROR } from './tlv';
 function getChild(m, keys) {
     let cur = m;
     for (let i = 0; i < keys.length; i++) {
@@ -27,6 +29,70 @@ export function encodePairingData(p) {
             },
         },
     };
+}
+function getChildOptional(m, ...keys) {
+    let cur = m;
+    for (let i = 0; i < keys.length; i++) {
+        if (!cur || typeof cur !== 'object')
+            return null;
+        cur = cur[keys[i]];
+    }
+    if (!cur || typeof cur !== 'object')
+        return null;
+    return cur;
+}
+function deepFindLocalizedDescription(obj) {
+    if (!obj || typeof obj !== 'object')
+        return null;
+    const rec = obj;
+    if (typeof rec.NSLocalizedDescription === 'string')
+        return rec.NSLocalizedDescription;
+    for (const key of Object.keys(rec)) {
+        const found = deepFindLocalizedDescription(rec[key]);
+        if (found)
+            return found;
+    }
+    return null;
+}
+function extractPairingRejectedMessage(event) {
+    const rej = event.pairingRejectedWithError;
+    if (!rej)
+        return null;
+    return deepFindLocalizedDescription(rej) || 'The iPhone declined the pairing request';
+}
+function pairingDataHasTlvError(data) {
+    return tlvReadCoalesced(data, TLV_ERROR).length > 0;
+}
+function tryDecodePairingData(event) {
+    const pd = getChildOptional(event, 'pairingData', '_0');
+    if (!pd)
+        return null;
+    try {
+        return decodePairingData(event);
+    }
+    catch {
+        return null;
+    }
+}
+/** Wait for SRP setup data after setupManualPairing, handling consent and rejection. */
+export async function readSetupPairingData(ch, onStatus) {
+    while (true) {
+        const event = await ch.readEvent();
+        const rejected = extractPairingRejectedMessage(event);
+        if (rejected)
+            throw new PairingTrustDeniedError(rejected);
+        if (event.awaitingUserConsent != null) {
+            onStatus && onStatus('Tap Trust on your iPhone to continue');
+            continue;
+        }
+        const pairing = tryDecodePairingData(event);
+        if (pairing) {
+            if (pairingDataHasTlvError(pairing.data)) {
+                throw new PairingTrustDeniedError();
+            }
+            return pairing;
+        }
+    }
 }
 export function decodePairingData(e) {
     const pd = getChildMap(e, 'pairingData', '_0');

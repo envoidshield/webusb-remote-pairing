@@ -4,7 +4,7 @@ import { chacha20poly1305 } from '@noble/ciphers/chacha';
 import { ed25519 } from '@noble/curves/ed25519';
 import { hkdf } from '@noble/hashes/hkdf';
 import { sha512 } from '@noble/hashes/sha512';
-import { ControlChannel, getChildMap } from './channel';
+import { ControlChannel, getChildMap, readSetupPairingData } from './channel';
 import { buildHostDeviceInfo } from './opack';
 import { newSrpClient } from './srp';
 import { PAIR_STATE_EXCHANGE_REQUEST, PAIR_STATE_VERIFY_REQUEST, TLV_ENCRYPTED_DATA, TLV_IDENTIFIER, TLV_INFO, TLV_METHOD, TLV_PROOF, TLV_PUBLIC_KEY, TLV_SALT, TLV_SIGNATURE, TLV_STATE, TlvBuffer, tlvReadCoalesced, } from './tlv';
@@ -42,8 +42,7 @@ export async function setupNewPairingGetHostKey(connOrChannel, selfId, onStatus)
         sendingHost: 'EnVoid',
         startNewSession: true,
     });
-    await ch.read();
-    const deviceEvent = await ch.readPairingEvent();
+    const deviceEvent = await readSetupPairingData(ch, onStatus);
     const devicePublic = tlvReadCoalesced(deviceEvent.data, TLV_PUBLIC_KEY);
     const salt = tlvReadCoalesced(deviceEvent.data, TLV_SALT);
     if (!devicePublic.length || !salt.length) {

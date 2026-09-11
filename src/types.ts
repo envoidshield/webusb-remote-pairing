@@ -3,6 +3,8 @@ import type { SelfIdentity, DevicePairRecord } from './pairing/record'
 export type PairingPhase =
     | 'idle'
     | 'claiming'
+    | 'reconnecting'
+    | 'needs-reselect'
     | 'discovering'
     | 'ndp'
     | 'rsd-tcp'
@@ -10,6 +12,7 @@ export type PairingPhase =
     | 'pair-tcp'
     | 'pairing'
     | 'complete'
+    | 'trust-denied'
     | 'error'
 
 export interface PairingProgress {
@@ -49,4 +52,6 @@ export interface ClaimedNcmInterface {
     epIn: number
     epOut: number
     claimedIface: number
+    /** True when NCM was claimed on an older USB config (macOS often blocks the live one). */
+    fallbackConfig?: boolean
 }

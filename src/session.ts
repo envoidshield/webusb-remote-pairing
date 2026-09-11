@@ -5,7 +5,10 @@ import {
     ICMPV6_NEIGHBOR_SOLICITATION, ICMPV6_NEIGHBOR_ADVERTISEMENT, ipv6ToString, ipv6LinkLocalFromMac,
     solicitedNodeAddress, buildNeighborSolicitation, parseNeighborAdvertisement, icmpv6Checksum, setIpv6DebugLog,
 } from './ipv6'
-import { parseMdns, findRemotePairingService, listAllServices, RemotePairingService, setMdnsDebugLog } from './mdns'
+import {
+    parseMdns, findRemotePairingServiceCached, listAllServices,
+    RemotePairingService, MdnsSrvHint, setMdnsDebugLog,
+} from './mdns'
 import { parseTcp, TcpConnection, TcpState, setTcpDebugLog } from './tcpstack'
 import { Http2Connection, setHttp2DebugLog } from './xhttp'
 import { RemoteXpcConnection, setXpcDebugLog, parseRsdHandshake } from './remotexpc'
@@ -15,6 +18,10 @@ import {
     getOrCreateSelfIdentity, saveTrustRecord, buildTrustRecordPlist, SelfIdentity,
 } from './pairing/record'
 import { claimCdcNcmInterface, releaseCdcNcmInterface, getAuthorizedAppleDevice } from './usb-claim'
+import {
+    UsbReselectRequiredError, isUsbReselectRequiredError,
+    isPairingTrustDeniedError, PAIRING_TRUST_DENIED_MSG,
+} from './errors'
 import type { PairDeviceOptions, PairingPhase, PairingProgress, TrustRecord } from './types'
 
 function arraysEqual(a: Uint8Array, b: Uint8Array): boolean {
@@ -61,6 +68,9 @@ export class RemotePairingSession {
     private pairReject: ((e: Error) => void) | null = null
     private aborted = false
     private discoverTimer: ReturnType<typeof setTimeout> | null = null
+    private usbTrafficSeen = false
+    private mdnsSrvCache: MdnsSrvHint[] = []
+    private claimedFallbackConfig = false
 
     constructor(options: PairDeviceOptions = {}) {
         this.opts = options
@@ -108,7 +118,7 @@ export class RemotePairingSession {
 
     /** Run the full USB → RSD → manual pairing flow. */
     async pair(): Promise<TrustRecord> {
-        if (this.phase !== 'idle' && this.phase !== 'complete' && this.phase !== 'error') {
+        if (this.phase !== 'idle' && this.phase !== 'complete' && this.phase !== 'error' && this.phase !== 'needs-reselect') {
             throw new Error('Session already running')
         }
 
@@ -150,6 +160,19 @@ export class RemotePairingSession {
         }
     }
 
+    private triggerNeedsReselect(): void {
+        this.clearDiscoverTimer()
+        this.reading = false
+        this.setPhase('needs-reselect')
+        void this.cleanupUsb()
+        if (this.pairReject) {
+            const rej = this.pairReject
+            this.pairReject = null
+            this.pairResolve = null
+            rej(new UsbReselectRequiredError())
+        }
+    }
+
     private async cleanupUsb() {
         const dev = this.device
         const iface = this.claimedIface
@@ -158,10 +181,10 @@ export class RemotePairingSession {
         if (dev) await releaseCdcNcmInterface(dev, iface)
     }
 
-    private rejectPair(msg: string): void {
+    private rejectPair(msg: string, phase: 'error' | 'trust-denied' = 'error'): void {
         this.clearDiscoverTimer()
         this.reading = false
-        this.setPhase('error', msg)
+        this.setPhase(phase, msg)
         void this.cleanupUsb()
         if (this.pairReject) {
             const rej = this.pairReject
@@ -194,6 +217,9 @@ export class RemotePairingSession {
         this.tunnelPort = null
         this.pairingStarted = false
         this.aborted = false
+        this.usbTrafficSeen = false
+        this.mdnsSrvCache = []
+        this.claimedFallbackConfig = false
 
         this.setPhase('claiming', 'Opening USB device')
         const dev = this.opts.device != null ? this.opts.device : await getAuthorizedAppleDevice()
@@ -204,23 +230,35 @@ export class RemotePairingSession {
             if (!dev.opened) await dev.open()
             this.emitLog(`Device: ${dev.productName} (${dev.serialNumber})`)
 
-            const claimed = await claimCdcNcmInterface(dev, m => this.emitLog(m), this.opts.signal)
+            const claimed = await claimCdcNcmInterface(
+                dev,
+                m => this.emitLog(m),
+                this.opts.signal,
+                () => this.setPhase('reconnecting', 'Waiting for iPhone to reconnect after USB mode switch'),
+            )
             this.device = claimed.device
             this.epIn = claimed.epIn
             this.epOut = claimed.epOut
             this.claimedIface = claimed.claimedIface
+            this.claimedFallbackConfig = claimed.fallbackConfig === true
 
             this.setPhase('discovering', 'Waiting for _remoted._tcp')
+            const discoverTimeoutMs = this.claimedFallbackConfig ? 15000 : 45000
             this.discoverTimer = setTimeout(() => {
-                if (this.phase === 'discovering') {
-                    this.rejectPair(
-                        'No mDNS from the iPhone after claiming CDC-NCM. Unlock the phone, use a data cable, and retry.',
-                    )
-                }
-            }, 45000)
+                if (this.phase !== 'discovering') return
+                const msg = this.claimedFallbackConfig
+                    ? 'No _remoted._tcp from the iPhone (fallback USB config). Quit Apple Devices/Xcode, ' +
+                      'unplug USB for 5s, replug, then ADD DEVICE again.'
+                    : 'No mDNS from the iPhone after claiming CDC-NCM. Unlock the phone, use a data cable, and retry.'
+                this.rejectPair(msg)
+            }, discoverTimeoutMs)
             this.reading = true
             void this.readLoop(claimed.device)
         } catch (e: any) {
+            if (isUsbReselectRequiredError(e)) {
+                this.triggerNeedsReselect()
+                return
+            }
             const msg = e && e.message ? e.message : String(e)
             this.rejectPair(msg)
         }
@@ -258,6 +296,7 @@ export class RemotePairingSession {
     }
 
     private processNcmTransfer(raw: DataView) {
+        this.usbTrafficSeen = true
         const block = parseNcmTransfer(raw)
         if (!block) return
         for (const dg of block.datagrams) this.processEthernetFrame(dg.data)
@@ -300,7 +339,7 @@ export class RemotePairingSession {
         if (!msg || this.mdnsCollected) return
         const services = listAllServices(msg)
         if (services.length > 0) this.emitLog(`mDNS: ${services.join('; ')}`)
-        const svc = findRemotePairingService(msg)
+        const svc = findRemotePairingServiceCached(msg, this.mdnsSrvCache)
         if (!svc) return
         this.mdnsCollected = true
         this.remotePairingSvc = svc
@@ -490,7 +529,16 @@ export class RemotePairingSession {
             }
             this.finishSuccess(hostKey, selfId)
         } catch (e: any) {
-            this.rejectPair(e.message)
+            if (isPairingTrustDeniedError(e)) {
+                this.rejectPair(e.message || PAIRING_TRUST_DENIED_MSG, 'trust-denied')
+                return
+            }
+            const msg = e && e.message ? e.message : String(e)
+            if (msg.includes('pairingData._0')) {
+                this.rejectPair(PAIRING_TRUST_DENIED_MSG, 'trust-denied')
+                return
+            }
+            this.rejectPair(msg)
         } finally {
             this.pairingInProgress = false
         }

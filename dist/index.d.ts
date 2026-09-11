@@ -6,6 +6,7 @@
 export type { PairingPhase, PairingProgress, TrustRecord, PairDeviceOptions, ClaimedNcmInterface, } from './types';
 export { RemotePairingSession, pairUsbDevice, } from './session';
 export { requestAppleUsbDevice, getAuthorizedAppleDevice, claimCdcNcmInterface, releaseCdcNcmInterface, findNcmCandidates, } from './usb-claim';
+export { UsbReselectRequiredError, isUsbReselectRequiredError, PairingTrustDeniedError, isPairingTrustDeniedError, PAIRING_TRUST_DENIED_MSG, USB_CLAIM_FAILED_MSG, } from './errors';
 export type { NcmCandidate } from './usb-claim';
 export { HOST_NAME, envoidHostIdentifier, createSelfIdentity, getOrCreateSelfIdentity, saveTrustRecord, buildTrustRecordPlist, downloadTrustRecord, loadStore, saveStore, } from './pairing/record';
 export type { SelfIdentity, DevicePairRecord, PairingStore, } from './pairing/record';

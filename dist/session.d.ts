@@ -30,6 +30,9 @@ export declare class RemotePairingSession {
     private pairReject;
     private aborted;
     private discoverTimer;
+    private usbTrafficSeen;
+    private mdnsSrvCache;
+    private claimedFallbackConfig;
     constructor(options?: PairDeviceOptions);
     get currentPhase(): PairingPhase;
     private emitLog;
@@ -39,6 +42,7 @@ export declare class RemotePairingSession {
     pair(): Promise<TrustRecord>;
     private finishSuccess;
     private clearDiscoverTimer;
+    private triggerNeedsReselect;
     private cleanupUsb;
     private rejectPair;
     private fail;

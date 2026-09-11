@@ -7,6 +7,8 @@ export interface PairingData {
 }
 export declare function getChildMap(m: Record<string, any>, ...keys: string[]): Record<string, any>;
 export declare function encodePairingData(p: PairingData): Record<string, any>;
+/** Wait for SRP setup data after setupManualPairing, handling consent and rejection. */
+export declare function readSetupPairingData(ch: ControlChannel, onStatus?: (msg: string) => void): Promise<PairingData>;
 export declare function decodePairingData(e: Record<string, any>): PairingData;
 export declare function wrapEnvelope(message: Record<string, any>, sequenceNumber: number): Record<string, any>;
 export declare function unwrapEnvelope(p: Record<string, any>): Record<string, any>;

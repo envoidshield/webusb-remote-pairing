@@ -127,6 +127,8 @@ Pair-setup uses user `Pair-Setup`, password `000000`, RFC 5054 3072-bit group, S
 | Phase | Meaning |
 |-------|---------|
 | `claiming` | Opening USB device and claiming CDC-NCM |
+| `reconnecting` | iPhone re-enumerating after Apple SET_MODE(3) |
+| `needs-reselect` | Chrome grant did not follow the new USB identity; user must pick the iPhone again |
 | `discovering` | Waiting for `_remoted._tcp` via mDNS |
 | `ndp` | IPv6 neighbor discovery (link-layer resolve) |
 | `rsd-tcp` | TCP connect to RSD service |
@@ -145,7 +147,8 @@ Pair-setup uses user `Pair-Setup`, password `000000`, RFC 5054 3072-bit group, S
 | `pairUsbDevice(opts?)` | One-shot: claim USB → discover RSD → pair → return `TrustRecord` |
 | `RemotePairingSession` | Same flow with `pair()`, `abort()`, `currentPhase` |
 | `requestAppleUsbDevice()` | `navigator.usb.requestDevice` for Apple (`vendorId 0x05ac`) |
-| `getAuthorizedAppleDevice()` | First pre-authorized Apple device, or `null` |
+| `getAuthorizedAppleDevice()` | Granted Apple device with CDC-NCM if one exists, else first Apple device, or `null` |
+| `UsbReselectRequiredError` | After SET_MODE, `open()` was denied on the new identity. Phase is `needs-reselect`, not `error`. |
 
 ### Trust record / persistence
 
@@ -222,7 +225,11 @@ The browser flow only **creates** the record; downstream tools use it for subseq
 | `No device selected` | User cancelled Chrome's USB chooser |
 | `No authorized Apple USB device` | Call `requestAppleUsbDevice()` first (from a click handler) |
 | `No CDC-NCM data interface found` | iPhone still in the 4-config USB mode. The library now sends Apple GET_MODE/SET_MODE(3) like go-ios and waits for re-enumeration. If it still fails on Windows: close iTunes / Apple Mobile Device Service, unlock the phone, use a data cable, iOS 17+. |
-| Pairing hangs at `discovering` | mDNS not seen — replug USB, unlock device |
+| `Could not claim the iPhone USB network interface` | On macOS, usbmuxd/Apple Devices often holds the live NCM config. Quit Apple Devices/Xcode, unplug USB for 5s, replug, retry. Optional: toggle Personal Hotspot on the iPhone. |
+| Pairing pauses at `needs-reselect` | iPhone changed USB mode; call `requestAppleUsbDevice()` again from a click handler |
+| Pairing pauses at `needs-reselect` after ~6s in `discovering` | Stale WebUSB handle after SET_MODE — tap SELECT IPHONE |
+| Pairing hangs at `discovering` past 45s | NCM claimed but mDNS not seen — unlock device, replug USB |
+| `iPhone disconnected. Plug it in and tap ADD DEVICE.` | No re-enumerated NCM handle within 15s after SET_MODE |
 | Pairing hangs at `pairing` | Trust not approved on device |
 | `Module parse failed: Unexpected token` | Old bundler not transpiling `dist/` or `@noble/*` — see Bundler notes |
 

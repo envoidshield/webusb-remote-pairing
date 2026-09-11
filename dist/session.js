@@ -1,7 +1,7 @@
 import { parseNcmTransfer, buildNcmTransfer, resetNcmSequence, setNcmDebugLog } from './ncm';
 import { parseEthernet, buildEthernet, ETHERTYPE_IPV6, macToString, solicitedNodeMac } from './ethernet';
 import { parseIPv6, buildIPv6, skipExtensionHeaders, IPPROTO_TCP, IPPROTO_UDP, IPPROTO_ICMPV6, ICMPV6_NEIGHBOR_SOLICITATION, ICMPV6_NEIGHBOR_ADVERTISEMENT, ipv6ToString, ipv6LinkLocalFromMac, solicitedNodeAddress, buildNeighborSolicitation, parseNeighborAdvertisement, icmpv6Checksum, setIpv6DebugLog, } from './ipv6';
-import { parseMdns, findRemotePairingService, listAllServices, setMdnsDebugLog } from './mdns';
+import { parseMdns, findRemotePairingServiceCached, listAllServices, setMdnsDebugLog, } from './mdns';
 import { parseTcp, TcpConnection, TcpState, setTcpDebugLog } from './tcpstack';
 import { Http2Connection, setHttp2DebugLog } from './xhttp';
 import { RemoteXpcConnection, setXpcDebugLog, parseRsdHandshake } from './remotexpc';
@@ -9,6 +9,7 @@ import { ControlChannel } from './pairing/channel';
 import { setupNewPairingGetHostKey } from './pairing/remotePair';
 import { getOrCreateSelfIdentity, saveTrustRecord, buildTrustRecordPlist, } from './pairing/record';
 import { claimCdcNcmInterface, releaseCdcNcmInterface, getAuthorizedAppleDevice } from './usb-claim';
+import { UsbReselectRequiredError, isUsbReselectRequiredError, isPairingTrustDeniedError, PAIRING_TRUST_DENIED_MSG, } from './errors';
 function arraysEqual(a, b) {
     if (a.length !== b.length)
         return false;
@@ -48,6 +49,9 @@ export class RemotePairingSession {
         this.pairReject = null;
         this.aborted = false;
         this.discoverTimer = null;
+        this.usbTrafficSeen = false;
+        this.mdnsSrvCache = [];
+        this.claimedFallbackConfig = false;
         this.opts = options;
         if (options.debug) {
             const log = (msg) => this.emitLog(msg);
@@ -92,7 +96,7 @@ export class RemotePairingSession {
     }
     /** Run the full USB → RSD → manual pairing flow. */
     async pair() {
-        if (this.phase !== 'idle' && this.phase !== 'complete' && this.phase !== 'error') {
+        if (this.phase !== 'idle' && this.phase !== 'complete' && this.phase !== 'error' && this.phase !== 'needs-reselect') {
             throw new Error('Session already running');
         }
         return new Promise((resolve, reject) => {
@@ -131,6 +135,18 @@ export class RemotePairingSession {
             this.discoverTimer = null;
         }
     }
+    triggerNeedsReselect() {
+        this.clearDiscoverTimer();
+        this.reading = false;
+        this.setPhase('needs-reselect');
+        void this.cleanupUsb();
+        if (this.pairReject) {
+            const rej = this.pairReject;
+            this.pairReject = null;
+            this.pairResolve = null;
+            rej(new UsbReselectRequiredError());
+        }
+    }
     async cleanupUsb() {
         const dev = this.device;
         const iface = this.claimedIface;
@@ -139,10 +155,10 @@ export class RemotePairingSession {
         if (dev)
             await releaseCdcNcmInterface(dev, iface);
     }
-    rejectPair(msg) {
+    rejectPair(msg, phase = 'error') {
         this.clearDiscoverTimer();
         this.reading = false;
-        this.setPhase('error', msg);
+        this.setPhase(phase, msg);
         void this.cleanupUsb();
         if (this.pairReject) {
             const rej = this.pairReject;
@@ -173,6 +189,9 @@ export class RemotePairingSession {
         this.tunnelPort = null;
         this.pairingStarted = false;
         this.aborted = false;
+        this.usbTrafficSeen = false;
+        this.mdnsSrvCache = [];
+        this.claimedFallbackConfig = false;
         this.setPhase('claiming', 'Opening USB device');
         const dev = this.opts.device != null ? this.opts.device : await getAuthorizedAppleDevice();
         if (!dev)
@@ -182,21 +201,31 @@ export class RemotePairingSession {
             if (!dev.opened)
                 await dev.open();
             this.emitLog(`Device: ${dev.productName} (${dev.serialNumber})`);
-            const claimed = await claimCdcNcmInterface(dev, m => this.emitLog(m), this.opts.signal);
+            const claimed = await claimCdcNcmInterface(dev, m => this.emitLog(m), this.opts.signal, () => this.setPhase('reconnecting', 'Waiting for iPhone to reconnect after USB mode switch'));
             this.device = claimed.device;
             this.epIn = claimed.epIn;
             this.epOut = claimed.epOut;
             this.claimedIface = claimed.claimedIface;
+            this.claimedFallbackConfig = claimed.fallbackConfig === true;
             this.setPhase('discovering', 'Waiting for _remoted._tcp');
+            const discoverTimeoutMs = this.claimedFallbackConfig ? 15000 : 45000;
             this.discoverTimer = setTimeout(() => {
-                if (this.phase === 'discovering') {
-                    this.rejectPair('No mDNS from the iPhone after claiming CDC-NCM. Unlock the phone, use a data cable, and retry.');
-                }
-            }, 45000);
+                if (this.phase !== 'discovering')
+                    return;
+                const msg = this.claimedFallbackConfig
+                    ? 'No _remoted._tcp from the iPhone (fallback USB config). Quit Apple Devices/Xcode, ' +
+                        'unplug USB for 5s, replug, then ADD DEVICE again.'
+                    : 'No mDNS from the iPhone after claiming CDC-NCM. Unlock the phone, use a data cable, and retry.';
+                this.rejectPair(msg);
+            }, discoverTimeoutMs);
             this.reading = true;
             void this.readLoop(claimed.device);
         }
         catch (e) {
+            if (isUsbReselectRequiredError(e)) {
+                this.triggerNeedsReselect();
+                return;
+            }
             const msg = e && e.message ? e.message : String(e);
             this.rejectPair(msg);
         }
@@ -233,6 +262,7 @@ export class RemotePairingSession {
         }
     }
     processNcmTransfer(raw) {
+        this.usbTrafficSeen = true;
         const block = parseNcmTransfer(raw);
         if (!block)
             return;
@@ -286,7 +316,7 @@ export class RemotePairingSession {
         const services = listAllServices(msg);
         if (services.length > 0)
             this.emitLog(`mDNS: ${services.join('; ')}`);
-        const svc = findRemotePairingService(msg);
+        const svc = findRemotePairingServiceCached(msg, this.mdnsSrvCache);
         if (!svc)
             return;
         this.mdnsCollected = true;
@@ -488,7 +518,16 @@ export class RemotePairingSession {
             this.finishSuccess(hostKey, selfId);
         }
         catch (e) {
-            this.rejectPair(e.message);
+            if (isPairingTrustDeniedError(e)) {
+                this.rejectPair(e.message || PAIRING_TRUST_DENIED_MSG, 'trust-denied');
+                return;
+            }
+            const msg = e && e.message ? e.message : String(e);
+            if (msg.includes('pairingData._0')) {
+                this.rejectPair(PAIRING_TRUST_DENIED_MSG, 'trust-denied');
+                return;
+            }
+            this.rejectPair(msg);
         }
         finally {
             this.pairingInProgress = false;
