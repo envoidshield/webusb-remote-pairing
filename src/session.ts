@@ -12,7 +12,6 @@ import {
 import { parseTcp, TcpConnection, TcpState, setTcpDebugLog } from './tcpstack'
 import { Http2Connection, setHttp2DebugLog } from './xhttp'
 import { RemoteXpcConnection, setXpcDebugLog, parseRsdHandshake } from './remotexpc'
-import type { RsdHandshake } from './xpc'
 import { LockdownConnection } from './lockdown'
 import { ControlChannel } from './pairing/channel'
 import { setupNewPairingGetHostKey } from './pairing/remotePair'
@@ -30,22 +29,6 @@ function arraysEqual(a: Uint8Array, b: Uint8Array): boolean {
     if (a.length !== b.length) return false
     for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
     return true
-}
-
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
-    return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error(message)), timeoutMs)
-        promise.then(
-            value => {
-                clearTimeout(timer)
-                resolve(value)
-            },
-            error => {
-                clearTimeout(timer)
-                reject(error)
-            },
-        )
-    })
 }
 
 export class RemotePairingSession {
@@ -588,105 +571,47 @@ export class RemotePairingSession {
         })
     }
 
-    private async refreshRsdHandshake(): Promise<RsdHandshake | null> {
-        if (!this.remotePairingSvc) return null
+    private async readTrustedLockdownDeviceInfo(): Promise<DeviceInfo> {
+        if (!this.remotePairingSvc || !this.lockdownPort) {
+            throw new Error('Trusted lockdown service is unavailable')
+        }
 
-        let http2: Http2Connection | null = null
-        let xpc: RemoteXpcConnection | null = null
+        let lockdown: LockdownConnection | null = null
         const connection = await this.connectServiceTcp(
             this.remotePairingSvc.address,
-            this.remotePairingSvc.port,
-            51000,
-            data => { if (http2) http2.feed(data) },
+            this.lockdownPort,
+            52000,
+            data => { if (lockdown) lockdown.feed(data) },
         )
         try {
-            const http2Ready = new Promise<void>(resolve => {
-                http2 = new Http2Connection(data => {
-                    if (connection.state === TcpState.ESTABLISHED) connection.send(data)
-                })
-                http2.log = message => this.emitLog(message)
-                http2.onReady = resolve
-                http2.start()
-            })
-            await withTimeout(http2Ready, 10000, 'Refreshed RSD HTTP/2 handshake timed out')
-
-            let resolveHandshake: (handshake: RsdHandshake) => void
-            const handshakePromise = new Promise<RsdHandshake>(resolve => {
-                resolveHandshake = resolve
-            })
-            xpc = new RemoteXpcConnection((streamId, data) => http2!.sendData(streamId, data))
-            xpc.log = message => this.emitLog(message)
-            xpc.onMessage = parsed => {
-                if (!parsed) return
-                const handshake = parseRsdHandshake(parsed)
-                if (handshake) resolveHandshake(handshake)
-            }
-            http2!.onStreamData[1] = data => { if (xpc) xpc.feed(data) }
-            http2!.onStreamData[3] = data => { if (xpc) xpc.feed(data) }
-            const initialized = xpc.initialize()
-            const handshake = await withTimeout(
-                handshakePromise,
-                10000,
-                'Refreshed RSD service catalog timed out',
-            )
-            await withTimeout(initialized, 10000, 'Refreshed RSD RemoteXPC initialization timed out')
-            return handshake
+            lockdown = new LockdownConnection(data => connection.send(data))
+            return await lockdown.readDeviceInfo()
         } finally {
             connection.close()
         }
     }
 
-    private async refreshTrustedRsdHandshake(): Promise<RsdHandshake> {
+    private async readDeviceInfoBestEffort(): Promise<DeviceInfo | undefined> {
+        this.setPhase('device-info', 'Reading device information')
         let lastError = new Error('Trusted lockdown service is unavailable')
+        await new Promise(resolve => setTimeout(resolve, 1000))
+
         for (let attempt = 1; attempt <= 4; attempt++) {
             if (attempt > 1) await new Promise(resolve => setTimeout(resolve, attempt * 750))
             try {
-                const handshake = await this.refreshRsdHandshake()
-                if (!handshake?.lockdownPort) {
-                    throw new Error('Trusted lockdown service is not advertised')
-                }
-                return handshake
+                const info = await this.readTrustedLockdownDeviceInfo()
+                this.emitLog('Lockdown device information received')
+                return info
             } catch (error: any) {
                 lastError = error instanceof Error ? error : new Error(String(error))
                 this.emitLog(
-                    `Post-trust RSD reconnect ${attempt}/4 failed: ${lastError.message}`
+                    `Post-trust lockdown reconnect ${attempt}/4 failed: ${lastError.message}`
                 )
             }
         }
-        throw lastError
-    }
 
-    private async readDeviceInfoBestEffort(): Promise<DeviceInfo | undefined> {
-        this.setPhase('device-info', 'Reading device information')
-        try {
-            const refreshed = await this.refreshTrustedRsdHandshake()
-            if (refreshed.udid !== this.rsdUdid) {
-                throw new Error('Refreshed RSD catalog belongs to another device')
-            }
-            if (!this.deviceIpv6Addr) {
-                throw new Error('Lockdown service is unavailable')
-            }
-
-            let lockdown: LockdownConnection | null = null
-            const connection = await this.connectServiceTcp(
-                this.deviceIpv6Addr,
-                refreshed.lockdownPort!,
-                52000,
-                data => { if (lockdown) lockdown.feed(data) },
-            )
-            try {
-                lockdown = new LockdownConnection(data => connection.send(data))
-                const info = await lockdown.readDeviceInfo()
-                this.emitLog('Lockdown device information received')
-                return info
-            } finally {
-                connection.close()
-            }
-        } catch (error: any) {
-            const message = error && error.message ? error.message : String(error)
-            this.emitLog(`Lockdown device info unavailable: ${message}`)
-            return undefined
-        }
+        this.emitLog(`Lockdown device info unavailable: ${lastError.message}`)
+        return undefined
     }
 
     private async runPairingCrypto() {

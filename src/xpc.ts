@@ -329,7 +329,8 @@ export function parseRsdHandshake(body: Record<string, XpcValue>): RsdHandshake 
         Array.isArray(body.Services) || body.Services instanceof Uint8Array) return null
     const services = body.Services as Record<string, XpcValue>
     const tunnelPort = parseServicePort(services, UNTRUSTED_TUNNEL_SERVICE)
-    const lockdownPort = parseServicePort(services, TRUSTED_LOCKDOWN_SERVICE)
+    const lockdownPort = parseServicePort(services, TRUSTED_LOCKDOWN_SERVICE) ??
+        parseServicePort(services, UNTRUSTED_LOCKDOWN_SERVICE)
     if (!tunnelPort && !lockdownPort) return null
     return { udid, tunnelPort, lockdownPort }
 }

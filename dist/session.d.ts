@@ -69,8 +69,7 @@ export declare class RemotePairingSession {
     private startPairingHttp2;
     private startPairingXpc;
     private connectServiceTcp;
-    private refreshRsdHandshake;
-    private refreshTrustedRsdHandshake;
+    private readTrustedLockdownDeviceInfo;
     private readDeviceInfoBestEffort;
     private runPairingCrypto;
 }
