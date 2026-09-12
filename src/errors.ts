@@ -14,9 +14,9 @@ export const PAIRING_TRUST_DENIED_MSG =
     'Trust was not granted on the iPhone. Tap ADD DEVICE again and tap Trust when prompted.'
 
 export const USB_CLAIM_FAILED_MSG =
-    'Could not claim the iPhone USB network interface. Quit Apple Devices and Xcode on this Mac, ' +
-    'unplug the USB cable for 5 seconds, replug, then tap ADD DEVICE again. ' +
-    'If it still fails, try toggling Personal Hotspot on the iPhone.'
+    'Could not claim the iPhone USB network interface. First enable Personal Hotspot over USB on the iPhone, ' +
+    'then tap ADD DEVICE again. If it still fails, quit Apple Devices and Xcode on this Mac, ' +
+    'unplug the USB cable for 5 seconds, and replug.'
 
 export class PairingTrustDeniedError extends Error {
     constructor(message = PAIRING_TRUST_DENIED_MSG) {
