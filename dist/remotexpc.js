@@ -1,6 +1,6 @@
 // RemoteXPC connection over HTTP/2 streams. Codec lives in xpc.ts (go-ios encoding.go).
 import { ALWAYS_SET_FLAG, DATA_FLAG, INIT_HANDSHAKE_FLAG, buildRemoteXpcMessage, buildXpcEmptyDict, decodeXpcBody, encodeXpcBody, parseRemoteXpcMessage, } from './xpc';
-export { ALWAYS_SET_FLAG, DATA_FLAG, INIT_HANDSHAKE_FLAG, UNTRUSTED_TUNNEL_SERVICE, buildRemoteXpcMessage, buildXpcEmptyDict, decodeXpcBody, encodeXpcBody, parseRemoteXpcMessage, parseRsdHandshake, REMOTEXPC_MAGIC, XPC_OBJECT_MAGIC, } from './xpc';
+export { ALWAYS_SET_FLAG, DATA_FLAG, INIT_HANDSHAKE_FLAG, TRUSTED_LOCKDOWN_SERVICE, UNTRUSTED_LOCKDOWN_SERVICE, UNTRUSTED_TUNNEL_SERVICE, buildRemoteXpcMessage, buildXpcEmptyDict, decodeXpcBody, encodeXpcBody, parseRemoteXpcMessage, parseRsdHandshake, REMOTEXPC_MAGIC, XPC_OBJECT_MAGIC, } from './xpc';
 export var xpcDebugLog = null;
 export function setXpcDebugLog(fn) { xpcDebugLog = fn; }
 export class RemoteXpcConnection {

@@ -11,6 +11,7 @@ export type PairingPhase =
     | 'rsd-handshake'
     | 'pair-tcp'
     | 'pairing'
+    | 'device-info'
     | 'complete'
     | 'trust-denied'
     | 'error'
@@ -18,6 +19,13 @@ export type PairingPhase =
 export interface PairingProgress {
     phase: PairingPhase
     message?: string
+}
+
+export interface DeviceInfo {
+    deviceName?: string
+    productType?: string
+    productVersion?: string
+    deviceClass?: string
 }
 
 export interface TrustRecord {
@@ -28,6 +36,7 @@ export interface TrustRecord {
     remoteUnlockHostKey: string
     plistXml: string
     deviceRecord: DevicePairRecord
+    deviceInfo?: DeviceInfo
 }
 
 export interface PairDeviceOptions {

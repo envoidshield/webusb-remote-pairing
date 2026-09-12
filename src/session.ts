@@ -12,6 +12,8 @@ import {
 import { parseTcp, TcpConnection, TcpState, setTcpDebugLog } from './tcpstack'
 import { Http2Connection, setHttp2DebugLog } from './xhttp'
 import { RemoteXpcConnection, setXpcDebugLog, parseRsdHandshake } from './remotexpc'
+import type { RsdHandshake } from './xpc'
+import { LockdownConnection } from './lockdown'
 import { ControlChannel } from './pairing/channel'
 import { setupNewPairingGetHostKey } from './pairing/remotePair'
 import {
@@ -22,12 +24,28 @@ import {
     UsbReselectRequiredError, isUsbReselectRequiredError,
     isPairingTrustDeniedError, PAIRING_TRUST_DENIED_MSG,
 } from './errors'
-import type { PairDeviceOptions, PairingPhase, PairingProgress, TrustRecord } from './types'
+import type { DeviceInfo, PairDeviceOptions, PairingPhase, PairingProgress, TrustRecord } from './types'
 
 function arraysEqual(a: Uint8Array, b: Uint8Array): boolean {
     if (a.length !== b.length) return false
     for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
     return true
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(message)), timeoutMs)
+        promise.then(
+            value => {
+                clearTimeout(timer)
+                resolve(value)
+            },
+            error => {
+                clearTimeout(timer)
+                reject(error)
+            },
+        )
+    })
 }
 
 export class RemotePairingSession {
@@ -60,6 +78,7 @@ export class RemotePairingSession {
 
     private rsdUdid: string | null = null
     private tunnelPort: number | null = null
+    private lockdownPort: number | null = null
     private pairingStarted = false
     private pairAfterInit = false
     private pairingInProgress = false
@@ -129,7 +148,7 @@ export class RemotePairingSession {
         })
     }
 
-    private finishSuccess(hostKey: string, selfId: SelfIdentity) {
+    private finishSuccess(hostKey: string, selfId: SelfIdentity, deviceInfo?: DeviceInfo) {
         if (!this.rsdUdid || !this.pairResolve) return
         const rec: TrustRecord = {
             udid: this.rsdUdid,
@@ -147,6 +166,7 @@ export class RemotePairingSession {
                 public_key: selfId.publicKey,
                 remote_unlock_host_key: hostKey,
             },
+            deviceInfo,
         }
         this.setPhase('complete', 'Paired')
         this.clearDiscoverTimer()
@@ -215,6 +235,7 @@ export class RemotePairingSession {
         this.tcpConnections = []
         this.rsdUdid = null
         this.tunnelPort = null
+        this.lockdownPort = null
         this.pairingStarted = false
         this.aborted = false
         this.usbTrafficSeen = false
@@ -455,7 +476,10 @@ export class RemotePairingSession {
             if (rsd) {
                 this.rsdUdid = rsd.udid
                 this.tunnelPort = rsd.tunnelPort
-                this.emitLog(`RSD: UDID=${rsd.udid} tunnelPort=${rsd.tunnelPort}`)
+                this.lockdownPort = rsd.lockdownPort
+                this.emitLog(
+                    `RSD: UDID=${rsd.udid} tunnelPort=${rsd.tunnelPort} lockdownPort=${rsd.lockdownPort || 'none'}`
+                )
                 this.beginPairing()
             }
         }
@@ -516,6 +540,128 @@ export class RemotePairingSession {
         }).catch((e: Error) => this.rejectPair(e.message))
     }
 
+    private connectServiceTcp(
+        dstAddr: Uint8Array,
+        dstPort: number,
+        srcPortBase: number,
+        onData: (data: Uint8Array) => void,
+    ): Promise<TcpConnection> {
+        const dstMac = this.resolvedDeviceMac || this.deviceMac
+        if (!dstMac) return Promise.reject(new Error('Device MAC is unavailable'))
+
+        return new Promise((resolve, reject) => {
+            const srcPort = srcPortBase + Math.floor(Math.random() * 500)
+            const connection = new TcpConnection(this.ourIpv6, dstAddr, srcPort, dstPort, tcpSegment => {
+                this.sendIPv6Packet(dstMac, buildIPv6(IPPROTO_TCP, 64, this.ourIpv6, dstAddr, tcpSegment))
+            })
+            const timer = setTimeout(() => {
+                connection.close()
+                reject(new Error(`TCP connection to port ${dstPort} timed out`))
+            }, 10000)
+            connection.log = message => this.emitLog(message)
+            connection.onData = onData
+            connection.onConnected = () => {
+                clearTimeout(timer)
+                connection.onError = message => this.emitLog(`Service TCP error: ${message}`)
+                resolve(connection)
+            }
+            connection.onError = message => {
+                clearTimeout(timer)
+                reject(new Error(message))
+            }
+            connection.connect()
+            this.tcpConnections.push(connection)
+        })
+    }
+
+    private async refreshRsdHandshake(): Promise<RsdHandshake | null> {
+        if (!this.remotePairingSvc) return null
+
+        let http2: Http2Connection | null = null
+        let xpc: RemoteXpcConnection | null = null
+        const connection = await this.connectServiceTcp(
+            this.remotePairingSvc.address,
+            this.remotePairingSvc.port,
+            51000,
+            data => { if (http2) http2.feed(data) },
+        )
+        try {
+            const http2Ready = new Promise<void>(resolve => {
+                http2 = new Http2Connection(data => {
+                    if (connection.state === TcpState.ESTABLISHED) connection.send(data)
+                })
+                http2.log = message => this.emitLog(message)
+                http2.onReady = resolve
+                http2.start()
+            })
+            await withTimeout(http2Ready, 10000, 'Refreshed RSD HTTP/2 handshake timed out')
+
+            let resolveHandshake: (handshake: RsdHandshake) => void
+            const handshakePromise = new Promise<RsdHandshake>(resolve => {
+                resolveHandshake = resolve
+            })
+            xpc = new RemoteXpcConnection((streamId, data) => http2!.sendData(streamId, data))
+            xpc.log = message => this.emitLog(message)
+            xpc.onMessage = parsed => {
+                if (!parsed) return
+                const handshake = parseRsdHandshake(parsed)
+                if (handshake) resolveHandshake(handshake)
+            }
+            http2!.onStreamData[1] = data => { if (xpc) xpc.feed(data) }
+            http2!.onStreamData[3] = data => { if (xpc) xpc.feed(data) }
+            const initialized = xpc.initialize()
+            const handshake = await withTimeout(
+                handshakePromise,
+                10000,
+                'Refreshed RSD service catalog timed out',
+            )
+            await withTimeout(initialized, 10000, 'Refreshed RSD RemoteXPC initialization timed out')
+            return handshake
+        } finally {
+            connection.close()
+        }
+    }
+
+    private async readDeviceInfoBestEffort(): Promise<DeviceInfo | undefined> {
+        this.setPhase('device-info', 'Reading device information')
+        try {
+            let refreshed: RsdHandshake | null = null
+            try {
+                refreshed = await this.refreshRsdHandshake()
+            } catch (error: any) {
+                const message = error && error.message ? error.message : String(error)
+                this.emitLog(`RSD service refresh unavailable, using initial catalog: ${message}`)
+            }
+            if (refreshed && refreshed.udid !== this.rsdUdid) {
+                throw new Error('Refreshed RSD catalog belongs to another device')
+            }
+            const lockdownPort = refreshed?.lockdownPort || this.lockdownPort
+            if (!lockdownPort || !this.deviceIpv6Addr) {
+                throw new Error('Lockdown service is unavailable')
+            }
+
+            let lockdown: LockdownConnection | null = null
+            const connection = await this.connectServiceTcp(
+                this.deviceIpv6Addr,
+                lockdownPort,
+                52000,
+                data => { if (lockdown) lockdown.feed(data) },
+            )
+            try {
+                lockdown = new LockdownConnection(data => connection.send(data))
+                const info = await lockdown.readDeviceInfo()
+                this.emitLog('Lockdown device information received')
+                return info
+            } finally {
+                connection.close()
+            }
+        } catch (error: any) {
+            const message = error && error.message ? error.message : String(error)
+            this.emitLog(`Lockdown device info unavailable: ${message}`)
+            return undefined
+        }
+    }
+
     private async runPairingCrypto() {
         if (this.pairingInProgress || !this.pairXpcConn || !this.rsdUdid) return
         this.pairingInProgress = true
@@ -527,7 +673,8 @@ export class RemotePairingSession {
             if (this.opts.persist !== false) {
                 await saveTrustRecord(this.rsdUdid, selfId, hostKey)
             }
-            this.finishSuccess(hostKey, selfId)
+            const deviceInfo = await this.readDeviceInfoBestEffort()
+            this.finishSuccess(hostKey, selfId, deviceInfo)
         } catch (e: any) {
             if (isPairingTrustDeniedError(e)) {
                 this.rejectPair(e.message || PAIRING_TRUST_DENIED_MSG, 'trust-denied')

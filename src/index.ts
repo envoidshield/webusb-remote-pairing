@@ -8,6 +8,7 @@ export type {
     PairingPhase,
     PairingProgress,
     TrustRecord,
+    DeviceInfo,
     PairDeviceOptions,
     ClaimedNcmInterface,
 } from './types'
@@ -63,7 +64,12 @@ export {
     encodeRemoteXpcDict,
     parseRemoteXpcMessage,
 } from './xpc'
-export { parseRsdHandshake, UNTRUSTED_TUNNEL_SERVICE } from './remotexpc'
+export {
+    parseRsdHandshake,
+    UNTRUSTED_TUNNEL_SERVICE,
+    TRUSTED_LOCKDOWN_SERVICE,
+    UNTRUSTED_LOCKDOWN_SERVICE,
+} from './remotexpc'
 
 export { RemoteXpcConnection } from './remotexpc'
 export { Http2Connection } from './xhttp'

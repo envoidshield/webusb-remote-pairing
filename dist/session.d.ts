@@ -23,6 +23,7 @@ export declare class RemotePairingSession {
     private pairXpcConn;
     private rsdUdid;
     private tunnelPort;
+    private lockdownPort;
     private pairingStarted;
     private pairAfterInit;
     private pairingInProgress;
@@ -66,6 +67,9 @@ export declare class RemotePairingSession {
     private startPairingConnection;
     private startPairingHttp2;
     private startPairingXpc;
+    private connectServiceTcp;
+    private refreshRsdHandshake;
+    private readDeviceInfoBestEffort;
     private runPairingCrypto;
 }
 export declare function pairUsbDevice(options?: PairDeviceOptions): Promise<TrustRecord>;

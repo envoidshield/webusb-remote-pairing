@@ -2,7 +2,7 @@
 
 Browser-only **iOS 17+ USB remote pairing** for Chrome (WebUSB). No native helpers, no TUN/VPN.
 
-Claims the device CDC-NCM interface, runs Ethernet → IPv6 → mDNS → TCP → HTTP/2 → RemoteXPC in JavaScript, completes RSD handshake, pairs via `com.apple.internal.dt.coredevice.untrusted.tunnelservice` (SRP-3072 + Ed25519), and returns a TrustRecord plist.
+Claims the device CDC-NCM interface, runs Ethernet → IPv6 → mDNS → TCP → HTTP/2 → RemoteXPC in JavaScript, completes RSD handshake, pairs via `com.apple.internal.dt.coredevice.untrusted.tunnelservice` (SRP-3072 + Ed25519), reads trusted lockdown device metadata, and returns a TrustRecord plist.
 
 Compatible with pymobiledevice3 / go-ios autotrust.
 
@@ -102,6 +102,7 @@ iPhone USB (CDC-NCM)
   → TCP → HTTP/2 → RemoteXPC → RSD Handshake (UDID + Services map)
   → second TCP → com.apple.internal.dt.coredevice.untrusted.tunnelservice
   → ControlChannel + SRP-3072 pair-setup (Trust dialog on device)
+  → refresh RSD services → lockdown RSDCheckin + GetValue
   → TrustRecord plist
 ```
 
@@ -135,6 +136,7 @@ Pair-setup uses user `Pair-Setup`, password `000000`, RFC 5054 3072-bit group, S
 | `rsd-handshake` | RemoteXPC init + RSD handshake (UDID, tunnel port) |
 | `pair-tcp` | TCP connect to `untrusted.tunnelservice` |
 | `pairing` | **Approve Trust on the device** — SRP pair-setup in progress |
+| `device-info` | Read device name, model, OS version, and class from trusted lockdown |
 | `complete` | Success |
 | `error` | Failed (see `onLog` / thrown error) |
 
@@ -179,6 +181,12 @@ Protocol building blocks are exported: `claimCdcNcmInterface`, `ControlChannel`,
     private_key: Uint8Array
     public_key: Uint8Array
     remote_unlock_host_key: string
+  }
+  deviceInfo?: {
+    deviceName?: string
+    productType?: string
+    productVersion?: string
+    deviceClass?: string
   }
 }
 ```
@@ -225,7 +233,7 @@ The browser flow only **creates** the record; downstream tools use it for subseq
 | `No device selected` | User cancelled Chrome's USB chooser |
 | `No authorized Apple USB device` | Call `requestAppleUsbDevice()` first (from a click handler) |
 | `No CDC-NCM data interface found` | iPhone still in the 4-config USB mode. The library now sends Apple GET_MODE/SET_MODE(3) like go-ios and waits for re-enumeration. If it still fails on Windows: close iTunes / Apple Mobile Device Service, unlock the phone, use a data cable, iOS 17+. |
-| `Could not claim the iPhone USB network interface` | On macOS, usbmuxd/Apple Devices often holds the live NCM config. Quit Apple Devices/Xcode, unplug USB for 5s, replug, retry. Optional: toggle Personal Hotspot on the iPhone. |
+| `Could not claim the iPhone USB network interface` | First enable Personal Hotspot over USB on the iPhone, then retry. On macOS, usbmuxd/Apple Devices often holds the live NCM config: quit Apple Devices/Xcode, unplug USB for 5s, replug. |
 | Pairing pauses at `needs-reselect` | iPhone changed USB mode; call `requestAppleUsbDevice()` again from a click handler |
 | Pairing pauses at `needs-reselect` after ~6s in `discovering` | Stale WebUSB handle after SET_MODE — tap SELECT IPHONE |
 | Pairing hangs at `discovering` past 45s | NCM claimed but mDNS not seen — unlock device, replug USB |

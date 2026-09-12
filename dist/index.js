@@ -13,7 +13,7 @@ export { TlvBuffer, tlvReadCoalesced, typePublicKey, typeSalt } from './pairing/
 export { opackEncode } from './pairing/opack';
 export { srpXHash, SRP_PASSWORD } from './pairing/srp';
 export { encodeXpcBody, decodeXpcBody, buildXpcEmptyDict, encodeRemoteXpcDict, parseRemoteXpcMessage, } from './xpc';
-export { parseRsdHandshake, UNTRUSTED_TUNNEL_SERVICE } from './remotexpc';
+export { parseRsdHandshake, UNTRUSTED_TUNNEL_SERVICE, TRUSTED_LOCKDOWN_SERVICE, UNTRUSTED_LOCKDOWN_SERVICE, } from './remotexpc';
 export { RemoteXpcConnection } from './remotexpc';
 export { Http2Connection } from './xhttp';
 export { TcpConnection, TcpState } from './tcpstack';

@@ -1,9 +1,15 @@
 /// <reference types="w3c-web-usb" />
 import type { SelfIdentity, DevicePairRecord } from './pairing/record';
-export type PairingPhase = 'idle' | 'claiming' | 'reconnecting' | 'needs-reselect' | 'discovering' | 'ndp' | 'rsd-tcp' | 'rsd-handshake' | 'pair-tcp' | 'pairing' | 'complete' | 'trust-denied' | 'error';
+export type PairingPhase = 'idle' | 'claiming' | 'reconnecting' | 'needs-reselect' | 'discovering' | 'ndp' | 'rsd-tcp' | 'rsd-handshake' | 'pair-tcp' | 'pairing' | 'device-info' | 'complete' | 'trust-denied' | 'error';
 export interface PairingProgress {
     phase: PairingPhase;
     message?: string;
+}
+export interface DeviceInfo {
+    deviceName?: string;
+    productType?: string;
+    productVersion?: string;
+    deviceClass?: string;
 }
 export interface TrustRecord {
     udid: string;
@@ -13,6 +19,7 @@ export interface TrustRecord {
     remoteUnlockHostKey: string;
     plistXml: string;
     deviceRecord: DevicePairRecord;
+    deviceInfo?: DeviceInfo;
 }
 export interface PairDeviceOptions {
     /** Authorized WebUSB device. If omitted, uses the first authorized Apple device. */

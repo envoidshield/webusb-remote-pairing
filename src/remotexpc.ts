@@ -16,6 +16,8 @@ export {
     ALWAYS_SET_FLAG,
     DATA_FLAG,
     INIT_HANDSHAKE_FLAG,
+    TRUSTED_LOCKDOWN_SERVICE,
+    UNTRUSTED_LOCKDOWN_SERVICE,
     UNTRUSTED_TUNNEL_SERVICE,
     buildRemoteXpcMessage,
     buildXpcEmptyDict,

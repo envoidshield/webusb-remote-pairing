@@ -1,5 +1,5 @@
 import { XpcValue } from './xpc';
-export { ALWAYS_SET_FLAG, DATA_FLAG, INIT_HANDSHAKE_FLAG, UNTRUSTED_TUNNEL_SERVICE, buildRemoteXpcMessage, buildXpcEmptyDict, decodeXpcBody, encodeXpcBody, parseRemoteXpcMessage, parseRsdHandshake, REMOTEXPC_MAGIC, XPC_OBJECT_MAGIC, } from './xpc';
+export { ALWAYS_SET_FLAG, DATA_FLAG, INIT_HANDSHAKE_FLAG, TRUSTED_LOCKDOWN_SERVICE, UNTRUSTED_LOCKDOWN_SERVICE, UNTRUSTED_TUNNEL_SERVICE, buildRemoteXpcMessage, buildXpcEmptyDict, decodeXpcBody, encodeXpcBody, parseRemoteXpcMessage, parseRsdHandshake, REMOTEXPC_MAGIC, XPC_OBJECT_MAGIC, } from './xpc';
 export type { RemoteXpcMessage, XpcValue } from './xpc';
 export declare var xpcDebugLog: ((msg: string) => void) | null;
 export declare function setXpcDebugLog(fn: ((msg: string) => void) | null): void;

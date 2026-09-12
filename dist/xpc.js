@@ -280,27 +280,37 @@ export function parseRemoteXpcMessage(data) {
     return [{ flags, bodyLength, messageId, body }, data.slice(totalLength)];
 }
 export const UNTRUSTED_TUNNEL_SERVICE = 'com.apple.internal.dt.coredevice.untrusted.tunnelservice';
+export const TRUSTED_LOCKDOWN_SERVICE = 'com.apple.mobile.lockdown.remote.trusted';
+export const UNTRUSTED_LOCKDOWN_SERVICE = 'com.apple.mobile.lockdown.remote.untrusted';
+function parseServicePort(services, serviceName) {
+    const entry = services[serviceName];
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry) || entry instanceof Uint8Array)
+        return null;
+    const value = entry.Port;
+    const port = typeof value === 'string' ? parseInt(value, 10) : Number(value);
+    return port && !Number.isNaN(port) ? port : null;
+}
 export function parseRsdHandshake(body) {
     if (body.MessageType !== 'Handshake')
         return null;
     let udid = '';
-    if (body.Properties && typeof body.Properties === 'object' && !Array.isArray(body.Properties)) {
+    if (body.Properties && typeof body.Properties === 'object' &&
+        !Array.isArray(body.Properties) && !(body.Properties instanceof Uint8Array)) {
         const props = body.Properties;
         if (typeof props.UniqueDeviceID === 'string')
             udid = props.UniqueDeviceID;
     }
     if (!udid)
         return null;
-    if (!body.Services || typeof body.Services !== 'object' || Array.isArray(body.Services))
+    if (!body.Services || typeof body.Services !== 'object' ||
+        Array.isArray(body.Services) || body.Services instanceof Uint8Array)
         return null;
     const services = body.Services;
-    const entry = services[UNTRUSTED_TUNNEL_SERVICE];
-    if (!entry || typeof entry !== 'object' || Array.isArray(entry))
+    const tunnelPort = parseServicePort(services, UNTRUSTED_TUNNEL_SERVICE);
+    if (!tunnelPort)
         return null;
-    const portStr = entry.Port;
-    const port = typeof portStr === 'string' ? parseInt(portStr, 10) : Number(portStr);
-    if (!port || Number.isNaN(port))
-        return null;
-    return { udid, tunnelPort: port };
+    const lockdownPort = parseServicePort(services, TRUSTED_LOCKDOWN_SERVICE) ??
+        parseServicePort(services, UNTRUSTED_LOCKDOWN_SERVICE);
+    return { udid, tunnelPort, lockdownPort };
 }
 //# sourceMappingURL=xpc.js.map

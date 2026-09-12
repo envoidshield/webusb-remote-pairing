@@ -299,21 +299,38 @@ export function parseRemoteXpcMessage(data: Uint8Array): [RemoteXpcMessage, Uint
 }
 
 export const UNTRUSTED_TUNNEL_SERVICE = 'com.apple.internal.dt.coredevice.untrusted.tunnelservice'
+export const TRUSTED_LOCKDOWN_SERVICE = 'com.apple.mobile.lockdown.remote.trusted'
+export const UNTRUSTED_LOCKDOWN_SERVICE = 'com.apple.mobile.lockdown.remote.untrusted'
 
-export function parseRsdHandshake(body: Record<string, XpcValue>): { udid: string; tunnelPort: number } | null {
+export interface RsdHandshake {
+    udid: string
+    tunnelPort: number
+    lockdownPort: number | null
+}
+
+function parseServicePort(services: Record<string, XpcValue>, serviceName: string): number | null {
+    const entry = services[serviceName]
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry) || entry instanceof Uint8Array) return null
+    const value = (entry as Record<string, XpcValue>).Port
+    const port = typeof value === 'string' ? parseInt(value, 10) : Number(value)
+    return port && !Number.isNaN(port) ? port : null
+}
+
+export function parseRsdHandshake(body: Record<string, XpcValue>): RsdHandshake | null {
     if (body.MessageType !== 'Handshake') return null
     let udid = ''
-    if (body.Properties && typeof body.Properties === 'object' && !Array.isArray(body.Properties)) {
+    if (body.Properties && typeof body.Properties === 'object' &&
+        !Array.isArray(body.Properties) && !(body.Properties instanceof Uint8Array)) {
         const props = body.Properties as Record<string, XpcValue>
         if (typeof props.UniqueDeviceID === 'string') udid = props.UniqueDeviceID
     }
     if (!udid) return null
-    if (!body.Services || typeof body.Services !== 'object' || Array.isArray(body.Services)) return null
+    if (!body.Services || typeof body.Services !== 'object' ||
+        Array.isArray(body.Services) || body.Services instanceof Uint8Array) return null
     const services = body.Services as Record<string, XpcValue>
-    const entry = services[UNTRUSTED_TUNNEL_SERVICE]
-    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null
-    const portStr = (entry as Record<string, XpcValue>).Port
-    const port = typeof portStr === 'string' ? parseInt(portStr, 10) : Number(portStr)
-    if (!port || Number.isNaN(port)) return null
-    return { udid, tunnelPort: port }
+    const tunnelPort = parseServicePort(services, UNTRUSTED_TUNNEL_SERVICE)
+    if (!tunnelPort) return null
+    const lockdownPort = parseServicePort(services, TRUSTED_LOCKDOWN_SERVICE) ??
+        parseServicePort(services, UNTRUSTED_LOCKDOWN_SERVICE)
+    return { udid, tunnelPort, lockdownPort }
 }

@@ -40,9 +40,13 @@ export interface RemoteXpcMessage {
 }
 export declare function parseRemoteXpcMessage(data: Uint8Array): [RemoteXpcMessage, Uint8Array] | null;
 export declare const UNTRUSTED_TUNNEL_SERVICE = "com.apple.internal.dt.coredevice.untrusted.tunnelservice";
-export declare function parseRsdHandshake(body: Record<string, XpcValue>): {
+export declare const TRUSTED_LOCKDOWN_SERVICE = "com.apple.mobile.lockdown.remote.trusted";
+export declare const UNTRUSTED_LOCKDOWN_SERVICE = "com.apple.mobile.lockdown.remote.untrusted";
+export interface RsdHandshake {
     udid: string;
     tunnelPort: number;
-} | null;
+    lockdownPort: number | null;
+}
+export declare function parseRsdHandshake(body: Record<string, XpcValue>): RsdHandshake | null;
 export {};
 //# sourceMappingURL=xpc.d.ts.map
