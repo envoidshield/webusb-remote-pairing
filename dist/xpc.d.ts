@@ -44,7 +44,7 @@ export declare const TRUSTED_LOCKDOWN_SERVICE = "com.apple.mobile.lockdown.remot
 export declare const UNTRUSTED_LOCKDOWN_SERVICE = "com.apple.mobile.lockdown.remote.untrusted";
 export interface RsdHandshake {
     udid: string;
-    tunnelPort: number;
+    tunnelPort: number | null;
     lockdownPort: number | null;
 }
 export declare function parseRsdHandshake(body: Record<string, XpcValue>): RsdHandshake | null;

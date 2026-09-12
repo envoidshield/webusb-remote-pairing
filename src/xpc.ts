@@ -304,7 +304,7 @@ export const UNTRUSTED_LOCKDOWN_SERVICE = 'com.apple.mobile.lockdown.remote.untr
 
 export interface RsdHandshake {
     udid: string
-    tunnelPort: number
+    tunnelPort: number | null
     lockdownPort: number | null
 }
 
@@ -329,8 +329,7 @@ export function parseRsdHandshake(body: Record<string, XpcValue>): RsdHandshake 
         Array.isArray(body.Services) || body.Services instanceof Uint8Array) return null
     const services = body.Services as Record<string, XpcValue>
     const tunnelPort = parseServicePort(services, UNTRUSTED_TUNNEL_SERVICE)
-    if (!tunnelPort) return null
-    const lockdownPort = parseServicePort(services, TRUSTED_LOCKDOWN_SERVICE) ??
-        parseServicePort(services, UNTRUSTED_LOCKDOWN_SERVICE)
+    const lockdownPort = parseServicePort(services, TRUSTED_LOCKDOWN_SERVICE)
+    if (!tunnelPort && !lockdownPort) return null
     return { udid, tunnelPort, lockdownPort }
 }

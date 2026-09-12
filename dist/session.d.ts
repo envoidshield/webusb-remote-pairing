@@ -27,6 +27,7 @@ export declare class RemotePairingSession {
     private pairingStarted;
     private pairAfterInit;
     private pairingInProgress;
+    private trustEstablished;
     private pairResolve;
     private pairReject;
     private aborted;
@@ -69,6 +70,7 @@ export declare class RemotePairingSession {
     private startPairingXpc;
     private connectServiceTcp;
     private refreshRsdHandshake;
+    private refreshTrustedRsdHandshake;
     private readDeviceInfoBestEffort;
     private runPairingCrypto;
 }

@@ -59,6 +59,7 @@ export class RemotePairingSession {
         this.pairingStarted = false;
         this.pairAfterInit = false;
         this.pairingInProgress = false;
+        this.trustEstablished = false;
         this.pairResolve = null;
         this.pairReject = null;
         this.aborted = false;
@@ -204,6 +205,7 @@ export class RemotePairingSession {
         this.tunnelPort = null;
         this.lockdownPort = null;
         this.pairingStarted = false;
+        this.trustEstablished = false;
         this.aborted = false;
         this.usbTrafficSeen = false;
         this.mdnsSrvCache = [];
@@ -421,7 +423,13 @@ export class RemotePairingSession {
         this.tcpConn.onConnected = () => this.startHttp2();
         this.tcpConn.onData = data => { if (this.http2Conn)
             this.http2Conn.feed(data); };
-        this.tcpConn.onError = msg => this.rejectPair(msg);
+        this.tcpConn.onError = msg => {
+            if (this.trustEstablished) {
+                this.emitLog(`RSD connection closed after trust: ${msg}`);
+                return;
+            }
+            this.rejectPair(msg);
+        };
         this.tcpConn.connect();
         this.tcpConnections.push(this.tcpConn);
     }
@@ -486,7 +494,13 @@ export class RemotePairingSession {
         this.pairTcpConn.onConnected = () => this.startPairingHttp2();
         this.pairTcpConn.onData = data => { if (this.pairHttp2Conn)
             this.pairHttp2Conn.feed(data); };
-        this.pairTcpConn.onError = msg => this.rejectPair(msg);
+        this.pairTcpConn.onError = msg => {
+            if (this.trustEstablished) {
+                this.emitLog(`Pairing connection closed after trust: ${msg}`);
+                return;
+            }
+            this.rejectPair(msg);
+        };
         this.pairTcpConn.connect();
         this.tcpConnections.push(this.pairTcpConn);
     }
@@ -592,26 +606,37 @@ export class RemotePairingSession {
             connection.close();
         }
     }
+    async refreshTrustedRsdHandshake() {
+        let lastError = new Error('Trusted lockdown service is unavailable');
+        for (let attempt = 1; attempt <= 4; attempt++) {
+            if (attempt > 1)
+                await new Promise(resolve => setTimeout(resolve, attempt * 750));
+            try {
+                const handshake = await this.refreshRsdHandshake();
+                if (!handshake?.lockdownPort) {
+                    throw new Error('Trusted lockdown service is not advertised');
+                }
+                return handshake;
+            }
+            catch (error) {
+                lastError = error instanceof Error ? error : new Error(String(error));
+                this.emitLog(`Post-trust RSD reconnect ${attempt}/4 failed: ${lastError.message}`);
+            }
+        }
+        throw lastError;
+    }
     async readDeviceInfoBestEffort() {
         this.setPhase('device-info', 'Reading device information');
         try {
-            let refreshed = null;
-            try {
-                refreshed = await this.refreshRsdHandshake();
-            }
-            catch (error) {
-                const message = error && error.message ? error.message : String(error);
-                this.emitLog(`RSD service refresh unavailable, using initial catalog: ${message}`);
-            }
-            if (refreshed && refreshed.udid !== this.rsdUdid) {
+            const refreshed = await this.refreshTrustedRsdHandshake();
+            if (refreshed.udid !== this.rsdUdid) {
                 throw new Error('Refreshed RSD catalog belongs to another device');
             }
-            const lockdownPort = refreshed?.lockdownPort || this.lockdownPort;
-            if (!lockdownPort || !this.deviceIpv6Addr) {
+            if (!this.deviceIpv6Addr) {
                 throw new Error('Lockdown service is unavailable');
             }
             let lockdown = null;
-            const connection = await this.connectServiceTcp(this.deviceIpv6Addr, lockdownPort, 52000, data => { if (lockdown)
+            const connection = await this.connectServiceTcp(this.deviceIpv6Addr, refreshed.lockdownPort, 52000, data => { if (lockdown)
                 lockdown.feed(data); });
             try {
                 lockdown = new LockdownConnection(data => connection.send(data));
@@ -638,6 +663,7 @@ export class RemotePairingSession {
             const channel = new ControlChannel(this.pairXpcConn);
             const selfId = this.opts.identity != null ? this.opts.identity : await getOrCreateSelfIdentity();
             const hostKey = await setupNewPairingGetHostKey(channel, selfId, m => this.emitLog(m));
+            this.trustEstablished = true;
             if (this.opts.persist !== false) {
                 await saveTrustRecord(this.rsdUdid, selfId, hostKey);
             }

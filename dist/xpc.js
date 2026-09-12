@@ -307,10 +307,9 @@ export function parseRsdHandshake(body) {
         return null;
     const services = body.Services;
     const tunnelPort = parseServicePort(services, UNTRUSTED_TUNNEL_SERVICE);
-    if (!tunnelPort)
+    const lockdownPort = parseServicePort(services, TRUSTED_LOCKDOWN_SERVICE);
+    if (!tunnelPort && !lockdownPort)
         return null;
-    const lockdownPort = parseServicePort(services, TRUSTED_LOCKDOWN_SERVICE) ??
-        parseServicePort(services, UNTRUSTED_LOCKDOWN_SERVICE);
     return { udid, tunnelPort, lockdownPort };
 }
 //# sourceMappingURL=xpc.js.map
