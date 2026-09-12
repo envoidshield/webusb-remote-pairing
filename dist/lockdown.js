@@ -33,21 +33,28 @@ export class LockdownConnection {
         }));
         this.validateResponse(await this.receive(), 'RSDCheckin');
         this.validateResponse(await this.receive(), 'StartService');
-        return {
-            deviceName: await this.getStringValue('DeviceName'),
-            productType: await this.getStringValue('ProductType'),
-            productVersion: await this.getStringValue('HumanReadableProductVersionString'),
-            deviceClass: await this.getStringValue('DeviceClass'),
-        };
-    }
-    async getStringValue(key) {
-        this.sendData(buildPlistFrame({ Key: key, Label: 'EnVoid', Request: 'GetValue' }));
+        this.sendData(buildPlistFrame({ Label: 'EnVoid', Request: 'GetValue' }));
         const response = await this.receive();
         if (response.Error !== undefined) {
-            throw new Error(`Lockdown GetValue ${key} failed: ${String(response.Error)}`);
+            throw new Error(`Lockdown GetValue failed: ${String(response.Error)}`);
         }
-        return typeof response.Value === 'string' && response.Value.length > 0
-            ? response.Value
+        const values = response.Value;
+        if (!values || typeof values !== 'object' ||
+            Array.isArray(values) || values instanceof Uint8Array) {
+            throw new Error('Lockdown GetValue returned no device information');
+        }
+        return {
+            deviceName: this.getStringValue(values, 'DeviceName'),
+            productType: this.getStringValue(values, 'ProductType'),
+            productVersion: this.getStringValue(values, 'ProductVersion') ||
+                this.getStringValue(values, 'HumanReadableProductVersionString'),
+            deviceClass: this.getStringValue(values, 'DeviceClass'),
+        };
+    }
+    getStringValue(values, key) {
+        const value = values[key];
+        return typeof value === 'string' && value.length > 0
+            ? value
             : undefined;
     }
     receive(timeoutMs = RESPONSE_TIMEOUT_MS) {
